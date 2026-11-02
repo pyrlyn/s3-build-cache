@@ -1,0 +1,7 @@
+.gradle/
+build/
+logs/
+.idea/
+.kotlin/
+example/.gradle/
+example/build/
