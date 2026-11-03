@@ -1,5 +1,8 @@
+import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
+
 plugins {
-    `kotlin-dsl`
+    `java-gradle-plugin`
+    alias(libs.plugins.kotlin.jvm)
 }
 
 group = "dev.pyrlyn"
@@ -7,7 +10,13 @@ version = "0.1.0"
 
 repositories { mavenCentral() }
 
-kotlin { jvmToolchain(21) }
+kotlin {
+    compilerOptions {
+        // Keep the plugin loadable by Gradle 9.x's embedded Kotlin (9.0 ships Kotlin 2.2).
+        apiVersion.set(KotlinVersion.KOTLIN_2_2)
+        languageVersion.set(KotlinVersion.KOTLIN_2_2)
+    }
+}
 
 dependencies {
     implementation(platform(libs.awssdk.bom))
@@ -20,7 +29,7 @@ dependencies {
 
 testing {
     suites {
-        val test by getting(JvmTestSuite::class) {
+        named<JvmTestSuite>("test") {
             useJUnitJupiter(libs.versions.junit)
             dependencies {
                 implementation(libs.mockk)

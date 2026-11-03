@@ -55,11 +55,11 @@ class MinioE2ETest {
     private fun key(hash: String) = object : BuildCacheKey {
         override fun getHashCode() = hash
         override fun toByteArray() = hash.toByteArray()
-        @Deprecated("deprecated in Gradle") override fun getDisplayName() = hash
     }
 
     private fun writer(data: ByteArray) = object : BuildCacheEntryWriter {
         override fun writeTo(output: OutputStream) = output.write(data)
+        override fun getInputStream(): java.io.InputStream = java.io.ByteArrayInputStream(data)
         override fun getSize() = data.size.toLong()
     }
 

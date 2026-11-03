@@ -78,12 +78,12 @@ private fun decodeAwsChunked(raw: ByteArray): ByteArray {
 internal fun key(hash: String) = object : BuildCacheKey {
     override fun getHashCode() = hash
     override fun toByteArray() = hash.toByteArray()
-    @Deprecated("deprecated in Gradle") override fun getDisplayName() = hash
 }
 
 internal fun writer(data: ByteArray) = object : BuildCacheEntryWriter {
     override fun writeTo(output: OutputStream) = output.write(data)
-    override fun getSize() = data.size.toLong()
+    override fun getInputStream(): java.io.InputStream = java.io.ByteArrayInputStream(data)
+        override fun getSize() = data.size.toLong()
 }
 
 /** Roundtrips through the real SDK against an in-process fake S3 (no Docker). */
