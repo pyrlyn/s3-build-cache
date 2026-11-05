@@ -1,92 +1,102 @@
 # s3-build-cache
 
-Settings-плагин Gradle: удалённый build cache поверх любого S3-совместимого хранилища (AWS S3, Cloudflare R2, MinIO). Клиент — AWS SDK v2.
-Записи хранятся как объекты `<prefix><hash ключа кэша>`. Если хранилище недоступно, Gradle отключает удалённый кэш до конца сборки, сборка не падает.
+Gradle settings plugin: remote build cache on any S3-compatible store (AWS S3, Cloudflare R2, MinIO). Client is AWS SDK v2.
+Entries are stored as objects `<prefix><cache-key hash>`. If the store is unreachable, Gradle disables the remote cache for the rest of the build; the build does not fail.
 
-## Подключение
-1. В `gradle.properties`: `org.gradle.caching=true`.
-2. В `settings.gradle.kts` примените плагин `dev.pyrlyn.s3-build-cache` и настройте `remote<S3BuildCache>` (см. `example/settings.gradle.kts`).
-3. Чтение — `isPull` (по умолчанию `true`), запись — `isPush`. Обычно пушит только CI: `isPush = System.getenv("CI") != null`.
-4. Ключи передавайте через переменные окружения, не коммитьте их.
+## Setup
+1. In `gradle.properties`: `org.gradle.caching=true`.
+2. In `settings.gradle.kts` apply plugin `dev.pyrlyn.s3-build-cache` and configure `remote<S3BuildCache>` (see `example/settings.gradle.kts`).
+3. Reads use `isPull` (default `true`); writes use `isPush`. Typically only CI pushes: `isPush = System.getenv("CI") != null`.
+4. Pass credentials via environment variables; do not commit them.
 
-## Параметры
-| Параметр | По умолчанию | Описание |
+## Parameters
+| Parameter | Default | Description |
 |---|---|---|
-| `endpoint` | `null` (AWS) | URL S3-совместимого сервера |
-| `bucket` | — | обязателен |
-| `region` | `us-east-1` | `auto` для R2 |
-| `accessKeyId` / `secretAccessKey` | `null` | без них — стандартная цепочка AWS |
-| `pathStyle` | `false` | `true` для MinIO и R2 |
-| `prefix` | `gradle-cache/` | общий неймспейс записей |
-| `isPull` / `isPush` | `true` / `false` | чтение / запись |
-| `maxConnections` | `50` | пул HTTP-соединений (Apache client) |
-| `connectionTimeoutMs` / `socketTimeoutMs` | `10000` / `60000` | таймауты соединения |
-| `connectionTimeToLiveMs` | `60000` | время жизни соединения в пуле |
-| `apiCallTimeoutMs` / `apiCallAttemptTimeoutMs` | `300000` / `120000` | общий таймаут вызова / одной попытки; ретраи — режим STANDARD |
-| `requestChecksumCalculation` | `WHEN_SUPPORTED` | `WHEN_REQUIRED` для старых S3-совместимых серверов |
-| `multipartThresholdBytes` | 16 MiB | с этого размера — multipart upload |
-| `multipartPartSizeBytes` | 8 MiB | размер части, минимум 5 MiB |
-| `maxSizeBytes` / `maxSizeMb` | `null` | лимит размера префикса, `null` — без вытеснения |
-| `lruRefreshAfterMs` | 1 ч | см. «Вытеснение» |
+| `endpoint` | `null` (AWS) | S3-compatible server URL |
+| `bucket` | — | required |
+| `region` | `us-east-1` | `auto` for R2 |
+| `accessKeyId` / `secretAccessKey` | `null` | without them — default AWS credential chain |
+| `pathStyle` | `false` | `true` for MinIO and R2 |
+| `prefix` | `gradle-cache/` | shared namespace for entries |
+| `isPull` / `isPush` | `true` / `false` | read / write |
+| `maxConnections` | `50` | HTTP connection pool (Apache client) |
+| `connectionTimeoutMs` / `socketTimeoutMs` | `10000` / `60000` | connection timeouts |
+| `connectionTimeToLiveMs` | `60000` | connection TTL in the pool |
+| `apiCallTimeoutMs` / `apiCallAttemptTimeoutMs` | `300000` / `120000` | overall call / single-attempt timeout; retries use STANDARD mode |
+| `requestChecksumCalculation` | `WHEN_SUPPORTED` | `WHEN_REQUIRED` for older S3-compatible servers |
+| `multipartThresholdBytes` | 16 MiB | multipart upload above this size |
+| `multipartPartSizeBytes` | 8 MiB | part size, minimum 5 MiB |
+| `maxSizeBytes` / `maxSizeMb` | `null` | prefix size limit; `null` disables eviction |
+| `lruRefreshAfterMs` | 1 h | see “Eviction” |
 
-## Как работает
-- Ключ объекта — только `<prefix><хеш ключа Gradle>`, без имени проекта и путей (чистая content-addressed схема).
-- Загрузка — один `GET` без `HEAD`, 404 = промах. Запись — `PUT` без предварительного `HEAD`.
-- Записи от 16 MiB грузятся multipart-ом: сначала во временный файл (в `java.io.tmpdir` демона Gradle), затем по частям; при ошибке upload отменяется (`AbortMultipartUpload`).
-- Ответы проверяются по контрольной сумме, если сервер её отдаёт (`WHEN_SUPPORTED`). Для запросов CRC32 считается по умолчанию; если старый сервер его не понимает, поставьте `requestChecksumCalculation = "WHEN_REQUIRED"`. На MinIO проверены оба режима.
+## How it works
+- Object key is only `<prefix><Gradle cache-key hash>`, with no project name or paths (pure content-addressed layout).
+- Load is a single `GET` with no `HEAD`; 404 is a miss. Store is a `PUT` with no prior `HEAD`.
+- Entries from 16 MiB use multipart: first to a temp file (under the Gradle daemon’s `java.io.tmpdir`), then part uploads; on failure the upload is aborted (`AbortMultipartUpload`).
+- Responses are verified by checksum when the server returns one (`WHEN_SUPPORTED`). Requests compute CRC32 by default; if an older server rejects it, set `requestChecksumCalculation = "WHEN_REQUIRED"`. Both modes were verified on MinIO.
 
-## Общий кэш для нескольких проектов
-Укажите одинаковые `bucket` и `prefix` в обоих проектах:
+## Shared cache across projects
+Use the same `bucket` and `prefix` in both projects:
 
 ```kotlin
-// project-a/settings.gradle.kts и project-b/settings.gradle.kts
+// project-a/settings.gradle.kts and project-b/settings.gradle.kts
 buildCache {
     remote<S3BuildCache> {
         endpoint = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
         bucket = "gradle-cache"
         region = "auto"
         pathStyle = true
-        prefix = "shared/"   // один и тот же префикс
+        prefix = "shared/"   // same prefix
         isPush = System.getenv("CI") != null
     }
 }
 ```
 
-Совпадающие задачи с одинаковыми входами получат один и тот же ключ, и кэш будет общим. Разные версии Gradle, плагинов или JDK меняют входы задач, поэтому хеши разойдутся сами — коллизий не будет, отдельный префикс для этого не нужен. Отдельный префикс нужен только если вы хотите раздельные квоты или чистку.
+Matching tasks with the same inputs get the same key, so the cache is shared. Different Gradle, plugin, or JDK versions change task inputs and hashes diverge on their own — no collisions, no separate prefix needed for that. Use a separate prefix only when you want separate quotas or cleanup.
 
 ## AWS S3
-- `endpoint` не задавать, `region` = регион бакета (например `eu-central-1`), `pathStyle = false`.
-- Без ключей используется стандартная цепочка AWS (env `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, профиль, роль).
-- Права IAM: `s3:GetObject`, `s3:PutObject` на `arn:aws:s3:::<bucket>/<prefix>*`.
+- Leave `endpoint` unset, set `region` to the bucket region (for example `eu-central-1`), `pathStyle = false`.
+- Without keys, the default AWS chain is used (env `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, profile, role).
+- IAM permissions: `s3:GetObject`, `s3:PutObject` on `arn:aws:s3:::<bucket>/<prefix>*`.
 
 ## Cloudflare R2
 - `endpoint = "https://<ACCOUNT_ID>.r2.cloudflarestorage.com"`, `region = "auto"`, `pathStyle = true`.
-- Ключи: R2 → Manage API Tokens → токен с правом Object Read & Write на бакет.
+- Keys: R2 → Manage API Tokens → token with Object Read & Write on the bucket.
 
 ## MinIO
 - `endpoint = "http://host:9000"`, `region = "us-east-1"`, `pathStyle = true`.
 
-## Вытеснение (опционально)
-`maxSizeMb = 5000` (или `maxSizeBytes`) включает вытеснение: после каждой успешной записи плагин перечисляет объекты под префиксом (`ListObjectsV2` с пагинацией), суммирует размеры и удаляет самые старые по `LastModified` (`DeleteObjects` пачками до 1000), пока не уложится в лимит.
+## Eviction (optional)
+`maxSizeMb = 5000` (or `maxSizeBytes`) turns on eviction: after each successful store the plugin lists objects under the prefix (`ListObjectsV2` with pagination), sums sizes, and deletes the oldest by `LastModified` (`DeleteObjects` in batches of up to 1000) until under the limit.
 
-В S3 нет времени доступа, поэтому LRU приблизительный: при попадании, если запись старше `lruRefreshAfterMs` (по умолчанию 1 ч), плагин обновляет её `LastModified` копированием объекта на себя (`CopyObject`, `REPLACE`). Порог ограничивает число лишних запросов.
+S3 has no access time, so LRU is approximate: on a hit, if the entry is older than `lruRefreshAfterMs` (default 1 h), the plugin refreshes `LastModified` by copying the object onto itself (`CopyObject`, `REPLACE`). The threshold limits extra requests.
 
-Ограничения:
-- Листинг на каждую запись стоит запросов; на больших префиксах (сотни тысяч объектов) лучше lifecycle-правило.
-- Параллельные сборки могут гоняться: кратковременно превысить лимит или удалить запись, которую кто-то только что прочитал. Для кэша это безопасно, будет просто промах.
-- Ошибки вытеснения и обновления не роняют сборку, пишется предупреждение.
+Limits:
+- Listing on every store costs requests; for large prefixes (hundreds of thousands of objects) prefer a lifecycle rule.
+- Parallel builds can race: briefly exceed the limit or delete an entry someone just read. For a cache that is fine — it is just a miss.
+- Eviction and refresh errors do not fail the build; a warning is logged.
 
-Нужны права `s3:ListBucket` и `s3:DeleteObject` (на R2 — Object Read & Write).
+Needs `s3:ListBucket` and `s3:DeleteObject` (on R2 — Object Read & Write).
 
-## Очистка без плагина
-Без `maxSizeBytes` плагин ничего не удаляет. Настройте lifecycle-правило бакета (S3 и R2 его поддерживают), например удалять объекты с префиксом старше 30 дней.
+## Cleanup without the plugin
+Without `maxSizeBytes` the plugin deletes nothing. Configure a bucket lifecycle rule (supported on S3 and R2), for example delete objects under the prefix older than 30 days.
 
-## Сборка
+## Build
 ```
-./gradlew build                 # компиляция и unit-тесты (MockK + фейковый S3 in-process)
-./gradlew e2eTest               # e2e против настоящего MinIO (Testcontainers); без Docker тесты пропускаются
-./gradlew publishToMavenLocal   # локальная публикация
-cd example && ../gradlew help   # проверка подключения плагина
+./gradlew build                 # compile and unit tests (MockK + in-process fake S3)
+./gradlew e2eTest               # e2e against real MinIO (Testcontainers); skipped without Docker
+./gradlew publishToMavenLocal   # local Maven publish
+./gradlew publish               # publish to GitHub Packages (CI; needs credentials)
+cd example && ../gradlew help   # verify the plugin resolves
 ```
 
-E2E по умолчанию использует образ `cgr.dev/chainguard/minio:latest` (официальные образы `minio/minio` больше не скачиваются с Docker Hub). Другой образ: `-De2e.minioImage=...` или `MINIO_IMAGE`. Для Colima сокет Docker подхватывается автоматически.
+## Publishing
+Artifacts are the Gradle plugin JAR (`dev.pyrlyn:s3-build-cache`).
+
+| Target | When |
+|---|---|
+| Maven Local (`~/.m2`) | `./gradlew publishToMavenLocal` for local use |
+| GitHub Packages | CI on `main` and version tags (`v*`); Maven repo `https://maven.pkg.github.com/pyrlyn/s3-build-cache` |
+| Gradle Plugin Portal / Maven Central | not configured yet (would be the usual public destinations for a Gradle plugin once Portal/OSSRH credentials exist) |
+
+E2E defaults to image `cgr.dev/chainguard/minio:latest` (official `minio/minio` images no longer pull from Docker Hub). Override with `-De2e.minioImage=...` or `MINIO_IMAGE`. For Colima the Docker socket is picked up automatically.
