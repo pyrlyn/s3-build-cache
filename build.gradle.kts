@@ -2,6 +2,7 @@ import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 
 plugins {
     `java-gradle-plugin`
+    `maven-publish`
     alias(libs.plugins.kotlin.jvm)
 }
 
@@ -66,6 +67,23 @@ gradlePlugin {
         create("s3BuildCache") {
             id = "dev.pyrlyn.s3-build-cache"
             implementationClass = "dev.pyrlyn.s3buildcache.S3BuildCachePlugin"
+        }
+    }
+}
+
+
+publishing {
+    publications {
+        // java-gradle-plugin already creates a pluginMaven publication; configure repos only.
+    }
+    repositories {
+        maven {
+            name = "GitHubPackages"
+            url = uri("https://maven.pkg.github.com/pyrlyn/s3-build-cache")
+            credentials {
+                username = System.getenv("GITHUB_ACTOR") ?: project.findProperty("gpr.user") as String? ?: ""
+                password = System.getenv("GITHUB_TOKEN") ?: project.findProperty("gpr.key") as String? ?: ""
+            }
         }
     }
 }
