@@ -56,7 +56,7 @@ class BazelCommandsTest {
         assertFalse(s.identity.contains("AK"))
         assertNotEquals(s.identity, s.copy(s3Prefix = "other").identity)
         assertNotEquals(s.identity, s.copy(upload = true).identity)
-        val env = BazelRemoteSettings.credentialEnv(mapOf("S3_CACHE_ACCESS_KEY_ID" to "AK", "S3_CACHE_SECRET_ACCESS_KEY" to "SK"))
+        val env = BazelRemoteSettings.credentialEnv("access_key", mapOf("S3_CACHE_ACCESS_KEY_ID" to "AK", "S3_CACHE_SECRET_ACCESS_KEY" to "SK"))
         assertEquals(mapOf("BAZEL_REMOTE_S3_ACCESS_KEY_ID" to "AK", "BAZEL_REMOTE_S3_SECRET_ACCESS_KEY" to "SK"), env)
         assertEquals("http://127.0.0.1:9090", s.url)
     }
@@ -66,6 +66,35 @@ class BazelCommandsTest {
         assertThrows<IllegalArgumentException> { BazelRemoteSettings("b", "/c", 5, 9090, "h", "", "p", null, false) }
         assertThrows<IllegalArgumentException> { BazelRemoteSettings("b", "/c", 0, 9090, "h", "bkt", "p", null, false) }
         assertThrows<IllegalArgumentException> { BazelRemoteSettings("b", "/c", 5, 9090, "h", "bkt", "../p", null, false) }
+    }
+
+    @Test fun `bazel-remote auth methods`() {
+        val base = BazelRemoteSettings("b", "/c", 5, 9090, "h", "bkt", "p", null, false)
+        val iam = base.copy(authMethod = "iam_role", iamRoleEndpoint = "http://169.254.169.254").command()
+        assertTrue("--s3.auth_method=iam_role" in iam && "--s3.iam_role_endpoint=http://169.254.169.254" in iam, iam.toString())
+        val file = base.copy(authMethod = "aws_credentials_file", credentialsFile = "/etc/creds", awsProfile = "ci").command()
+        assertTrue("--s3.auth_method=aws_credentials_file" in file, file.toString())
+        assertTrue("--s3.aws_shared_credentials_file=/etc/creds" in file && "--s3.aws_profile=ci" in file, file.toString())
+        assertEquals(base.identity, base.copy(authMethod = "iam_role").identity, "auth does not change cache identity")
+        assertThrows<IllegalArgumentException> { base.copy(authMethod = "anonymous") }
+        assertThrows<IllegalArgumentException> { base.copy(iamRoleEndpoint = "http://x") }
+        assertThrows<IllegalArgumentException> { base.copy(authMethod = "iam_role", credentialsFile = "/x") }
+
+        val keys = mapOf("S3_CACHE_ACCESS_KEY_ID" to "AK", "S3_CACHE_SECRET_ACCESS_KEY" to "SK")
+        assertEquals(emptyMap<String, String>(), BazelRemoteSettings.credentialEnv("iam_role", keys), "keys only for access_key")
+        val e = assertThrows<IllegalArgumentException> {
+            BazelRemoteSettings.credentialEnv("access_key", mapOf("S3_CACHE_ACCESS_KEY_ID" to "AK"))
+        }
+        assertTrue(e.message!!.contains("S3_CACHE_SECRET_ACCESS_KEY") && !e.message!!.contains("AK,"), e.message)
+    }
+
+    @Test fun `bazel info keys are requested and parsed`() {
+        assertEquals(listOf("bazel", "info", "-c", "opt", "execution_root", "output_base", "install_base"),
+            BazelCommands.info("bazel", emptyList(), listOf("-c", "opt")))
+        val info = BazelCommands.parseInfo("execution_root: /o/execroot/_main\noutput_base: /o\ninstall_base: /r/install/x\n")
+        assertEquals("/o/execroot/_main", info["execution_root"])
+        assertThrows<IllegalArgumentException> { BazelCommands.parseInfo("/o/execroot/_main\n") }
+        assertThrows<IllegalArgumentException> { BazelCommands.parseInfo("execution_root: /o\n") }
     }
 
     @Test fun `output groups and reserved build args`() {

@@ -5,17 +5,20 @@ import org.gradle.api.GradleException
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
 import org.gradle.api.file.FileTree
+import org.gradle.api.model.ObjectFactory
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
+import org.gradle.api.provider.Provider
+import org.gradle.api.provider.ProviderFactory
 import org.gradle.api.tasks.*
 import java.io.File
-import java.nio.file.Files
-import java.nio.file.StandardCopyOption
+import javax.inject.Inject
 
 /**
  * Runs `bazel build` for explicit target labels and copies each target's default output files
- * (resolved with `bazel cquery --output=files`) into [outputDirectory].
+ * and tree artifacts (resolved with `bazel cquery --output=files`), optionally with runfiles,
+ * into [outputDirectory].
  *
  * Local sources and package definitions are discovered before Gradle snapshots inputs.
  * [inputFiles] supplies additional dependencies not represented in the Bazel graph.
@@ -44,18 +47,32 @@ abstract class BazelBuild : DefaultTask() {
     abstract val inputFiles: ConfigurableFileCollection
     /** Discover main-workspace source and package definition files before up-to-date/cache checks. */
     @get:Input abstract val discoverSourceInputs: Property<Boolean>
-    private val discoveredPaths by lazy { discoverInputs() }
+    private class Discovery(val paths: List<String>) {
+        val files = paths.toSet()
+        val dirs = paths.flatMap { p -> p.split('/').dropLast(1).runningReduce { a, b -> "$a/$b" } }.toSet()
+    }
+    // Memoized per task instance only. Transient: a configuration cache entry must never carry a
+    // stale query result, so discovery reruns in every build, also when the entry is reused.
+    @Transient private var discoveryMemo: Discovery? = null
+    private val discovery: Discovery
+        get() = discoveryMemo ?: Discovery(discoverInputs()).also { discoveryMemo = it }
+
+    // Both discovery inputs stay lazy: Gradle inspects input getters while it builds the task graph,
+    // and Bazel must only be queried when inputs are snapshotted, never during configuration.
     /** Stable workspace-relative membership, without configuration hashes or external labels. */
-    @get:Input val discoveredSourcePaths: List<String>
-        get() = discoveredPaths
+    @get:Input val discoveredSourcePaths: Provider<List<String>>
+        get() = providers.provider { discovery.paths }
     @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE)
     val discoveredSourceFiles: FileTree
-        get() = project.fileTree(workspaceDirectory.get().asFile) {
+        get() = objects.fileTree().from(workspaceDirectory).also { tree ->
             // Anchor normalization at the workspace, not each file: equally named files in
             // different packages must retain their path/content association in the cache key.
-            it.setIncludes(discoveredPaths)
-            if (discoveredPaths.isEmpty()) it.exclude("**")
+            // Directories outside discovered paths are pruned, so the walk never enters bazel-* links.
+            tree.include { e -> if (e.isDirectory) e.relativePath.pathString in discovery.dirs else e.relativePath.pathString in discovery.files }
         }
+
+    @get:Inject protected abstract val objects: ObjectFactory
+    @get:Inject protected abstract val providers: ProviderFactory
 
     /** Workspace config that always affects results (.bazelversion, MODULE.bazel[.lock], .bazelrc), if present. */
     @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE) @get:Optional
@@ -63,6 +80,12 @@ abstract class BazelBuild : DefaultTask() {
         get() = listOf(".bazelversion", "MODULE.bazel", "MODULE.bazel.lock", ".bazelrc", "WORKSPACE", "WORKSPACE.bazel")
             .map { File(workspaceDirectory.get().asFile, it) }.filter { it.isFile }
     @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
+
+    /**
+     * Also copy the `<file>.runfiles` tree next to each executable output, as plain files, so the
+     * executable can run from [outputDirectory]. The runfiles MANIFEST is not copied.
+     */
+    @get:Input abstract val includeRunfiles: Property<Boolean>
 
     /**
      * Acknowledge that the declared inputs fully determine the outputs. Default false: the task is
@@ -86,7 +109,8 @@ abstract class BazelBuild : DefaultTask() {
         useManagedBazelRemote.convention(false)
         assumeHermetic.convention(false)
         discoverSourceInputs.convention(true)
-        outputs.cacheIf("assumeHermetic is true") { assumeHermetic.get() }
+        includeRunfiles.convention(false)
+        outputs.cacheIf("assumeHermetic is true") { (it as BazelBuild).assumeHermetic.get() }
     }
 
     private fun discoverInputs(): List<String> {
@@ -137,7 +161,9 @@ abstract class BazelBuild : DefaultTask() {
         }
         val ws = workspaceDirectory.get().asFile
         exec(ws, BazelCommands.build(exe, startup, args, BazelCommands.remoteFlags(url, remoteUpload.get()), ts))
-        val execRoot = File(exec(ws, BazelCommands.executionRoot(exe, startup, args)).trim()).canonicalFile
+        val info = BazelCommands.parseInfo(exec(ws, BazelCommands.info(exe, startup, args)))
+        val execRoot = File(info.getValue("execution_root")).toPath()
+        val copier = BazelOutputs(listOf(ws.toPath()) + listOf("output_base", "install_base").map { File(info.getValue(it)).toPath() })
 
         val out = outputDirectory.get().asFile
         out.deleteRecursively(); out.mkdirs()
@@ -146,17 +172,26 @@ abstract class BazelBuild : DefaultTask() {
             if (files.isEmpty()) throw GradleException("$t produced no default output files")
             val rename = names[t]
             if (rename != null && files.size != 1) throw GradleException("$t has ${files.size} outputs; outputNames requires exactly one")
+            var runfilesFound = false
             for (rel in files) {
                 if (rel.startsWith("/") || rel.split('/').any { it == ".." }) {
                     throw GradleException("refusing to copy $rel: not a path relative to the Bazel execution root")
                 }
-                val src = File(execRoot, rel)
-                if (src.isDirectory) throw GradleException("$t output $rel is a tree artifact (directory); not supported in this MVP")
-                if (!src.isFile) throw GradleException("$t output $rel does not exist after build")
-                val dest = File(out, rename ?: src.name)
-                if (dest.exists()) throw GradleException("output file name collision: ${dest.name}; use outputNames")
-                Files.copy(src.toPath(), dest.toPath(), StandardCopyOption.COPY_ATTRIBUTES)
-                dest.setWritable(true)
+                val src = execRoot.resolve(rel)
+                val dest = File(out, rename ?: src.fileName.toString()).toPath()
+                try {
+                    val tree = copier.copy(src, dest, "$t output $rel")
+                    val runfiles = execRoot.resolve("$rel.runfiles")
+                    if (includeRunfiles.get() && !tree && runfiles.toFile().isDirectory) {
+                        copier.copyRunfiles(runfiles, dest.resolveSibling("${dest.fileName}.runfiles"), "$t runfiles")
+                        runfilesFound = true
+                    }
+                } catch (e: IllegalStateException) {
+                    throw GradleException(e.message!!, e)
+                }
+            }
+            if (includeRunfiles.get() && !runfilesFound) {
+                throw GradleException("$t has no runfiles tree: it is not executable, or runfile links are disabled (--nobuild_runfile_links)")
             }
         }
     }
