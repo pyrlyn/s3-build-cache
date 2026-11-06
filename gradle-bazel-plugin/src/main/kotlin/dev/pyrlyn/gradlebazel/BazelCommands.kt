@@ -71,6 +71,20 @@ object BazelCommands {
     fun buildFiles(exe: String, startup: List<String>, targets: List<String>) =
         listOf(exe) + startup + listOf("query", "--output=label", "--", "buildfiles(deps(${targetSet(targets)}))")
 
-    fun executionRoot(exe: String, startup: List<String>, args: List<String>) =
-        listOf(exe) + startup + "info" + args + "execution_root"
+    /** Keys whose directories may contain (or be the target of symlinks from) exported outputs. */
+    val INFO_KEYS = listOf("execution_root", "output_base", "install_base")
+
+    fun info(exe: String, startup: List<String>, args: List<String>) =
+        listOf(exe) + startup + "info" + args + INFO_KEYS
+
+    /** `bazel info k1 k2 ...` prints one `key: value` line per key. */
+    fun parseInfo(output: String): Map<String, String> {
+        val values = output.lines().filter { it.isNotBlank() }.associate { line ->
+            val key = line.substringBefore(": ", "")
+            require(key.isNotEmpty()) { "unexpected bazel info line: $line" }
+            key to line.substringAfter(": ").trim()
+        }
+        INFO_KEYS.forEach { k -> require(!values[k].isNullOrBlank()) { "bazel info did not report $k" } }
+        return values
+    }
 }

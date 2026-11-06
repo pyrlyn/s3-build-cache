@@ -1,0 +1,6 @@
+load("//defs:rules.bzl", "tool")
+
+tool(
+    name = "tool",
+    data = "data.txt",
+)

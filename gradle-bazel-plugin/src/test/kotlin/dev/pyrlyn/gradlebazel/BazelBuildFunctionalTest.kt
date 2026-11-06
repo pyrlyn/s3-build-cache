@@ -20,9 +20,17 @@ class BazelBuildFunctionalTest {
                 echo "$*" >> "${dir.absolutePath}/calls.log"
                 cmd=""; for a in "$@"; do case "${'$'}a" in build|cquery|info|query) cmd="${'$'}a"; break;; esac; done
                 case "${'$'}cmd" in
-                  info) echo "${execroot.absolutePath}" ;;
-                  build) mkdir -p "${execroot.absolutePath}/bazel-out/bin/lib"
-                         cat "${dir.absolutePath}/ws/src/nested/src.kt" > "${execroot.absolutePath}/bazel-out/bin/lib/lib.jar" ;;
+                  info) echo "execution_root: ${execroot.absolutePath}"
+                        echo "output_base: ${dir.absolutePath}"
+                        echo "install_base: ${dir.absolutePath}/install" ;;
+                  build) b="${execroot.absolutePath}/bazel-out/bin"
+                         mkdir -p "${'$'}b/lib" "${'$'}b/tree/sub" "${'$'}b/tool.runfiles/_main"
+                         cat "${dir.absolutePath}/ws/src/nested/src.kt" > "${'$'}b/lib/lib.jar"
+                         echo a > "${'$'}b/tree/a.txt"; echo b > "${'$'}b/tree/sub/b.txt"
+                         printf '#!/bin/sh\ncat "${'$'}0.runfiles/_main/data.txt"\n' > "${'$'}b/tool"; chmod +x "${'$'}b/tool"
+                         echo "_main/data.txt /abs" > "${'$'}b/tool.runfiles/MANIFEST"
+                         rm -f "${'$'}b/tool.runfiles/_main/data.txt"
+                         ln -s "${dir.absolutePath}/ws/src/nested/src.kt" "${'$'}b/tool.runfiles/_main/data.txt" ;;
                   cquery) case "$*" in
                             *--output=label*)
                               test ! -f "${dir.absolutePath}/fail-query" || exit 7
@@ -32,7 +40,8 @@ class BazelBuildFunctionalTest {
                                 echo '//src:nested/src.kt (null)'
                                 echo '@@compiler+//:downloaded.jar (null)'
                               fi ;;
-                            *) echo "bazel-out/bin/lib/lib.jar" ;;
+                            *) if test -f "${dir.absolutePath}/output-files"; then cat "${dir.absolutePath}/output-files"
+                               else echo "bazel-out/bin/lib/lib.jar"; fi ;;
                           esac ;;
                   query) test ! -f "${dir.absolutePath}/fail-metadata" || exit 8
                          echo '//src:BUILD.bazel'; echo '//defs:rules.bzl'; echo '//defs:BUILD.bazel' ;;
@@ -48,6 +57,7 @@ class BazelBuildFunctionalTest {
         File(dir, "ws/defs/rules.bzl").writeText("# extension")
         File(dir, "ws/defs/BUILD.bazel").writeText("# definitions")
         File(dir, "ws/MODULE.bazel").writeText("module(name = \"t\")")
+        File(dir, "install").mkdirs()
         File(dir, "settings.gradle.kts").writeText(
             "rootProject.name = \"t\"\nbuildCache { local { directory = file(\"${File(dir, "gradle-cache").absolutePath}\") } }"
         )
@@ -210,6 +220,65 @@ class BazelBuildFunctionalTest {
         assertEquals(TaskOutcome.SUCCESS, outcome("--build-cache"))
     }
 
+    @Test fun `configuration cache is stored, reused, and still rediscovers inputs`() {
+        setup(explicitInputs = false)
+        val first = run("bazelLib", "--configuration-cache").build()
+        assertEquals(TaskOutcome.SUCCESS, first.task(":bazelLib")!!.outcome)
+        assertTrue(first.output.contains("Configuration cache entry stored"), first.output)
+        val second = run("bazelLib", "--configuration-cache").build()
+        assertTrue(second.output.contains("Configuration cache entry reused"), second.output)
+        assertEquals(TaskOutcome.UP_TO_DATE, second.task(":bazelLib")!!.outcome)
+        File(dir, "ws/src/nested/src.kt").writeText("cc-v2")
+        val third = run("bazelLib", "--configuration-cache").build()
+        assertTrue(third.output.contains("Configuration cache entry reused"), third.output)
+        assertEquals(TaskOutcome.SUCCESS, third.task(":bazelLib")!!.outcome, "sources are rediscovered on a reused entry")
+        assertEquals("cc-v2", File(dir, "build/bazel/bazelLib/lib.jar").readText())
+    }
+
+    @Test fun `managed bazel-remote configuration is configuration cache compatible`() {
+        setup("bazelRemote { enabled.set(true); executable.set(\"/nonexistent/bazel-remote\"); s3Bucket.set(\"b\"); s3Endpoint.set(\"h:9000\") }",
+            task = "")
+        val r = run("bazelLib", "--configuration-cache").build()
+        assertTrue(r.output.contains("Configuration cache entry stored"), r.output)
+        assertTrue(r.output.contains("assumeHermetic=false, Bazel remote cache disabled"), r.output)
+    }
+
+    @Test fun `tree artifacts are exported as directories`() {
+        setup()
+        File(dir, "output-files").writeText("bazel-out/bin/tree")
+        assertEquals(TaskOutcome.SUCCESS, outcome())
+        assertEquals("a", File(dir, "build/bazel/bazelLib/lib.jar/a.txt").readText().trim(), "renamed tree")
+        assertEquals("b", File(dir, "build/bazel/bazelLib/lib.jar/sub/b.txt").readText().trim())
+    }
+
+    @Test fun `runfiles are copied on request and the executable runs from the output`() {
+        setup(task = "assumeHermetic.set(true); includeRunfiles.set(providers.gradleProperty(\"rf\").map { it.toBoolean() }.orElse(true)); outputNames.empty()")
+        File(dir, "output-files").writeText("bazel-out/bin/tool")
+        assertEquals(TaskOutcome.SUCCESS, outcome())
+        val tool = File(dir, "build/bazel/bazelLib/tool")
+        assertFalse(File(dir, "build/bazel/bazelLib/tool.runfiles/MANIFEST").exists())
+        assertFalse(java.nio.file.Files.isSymbolicLink(File(dir, "build/bazel/bazelLib/tool.runfiles/_main/data.txt").toPath()))
+        val p = ProcessBuilder(tool.absolutePath).redirectErrorStream(true).start()
+        assertEquals("v1", p.inputStream.bufferedReader().readText().trim())
+        assertEquals(0, p.waitFor())
+        assertEquals(TaskOutcome.SUCCESS, outcome("-Prf=false"), "includeRunfiles is fingerprinted")
+        assertFalse(File(dir, "build/bazel/bazelLib/tool.runfiles").exists())
+
+        File(dir, "output-files").writeText("bazel-out/bin/lib/lib.jar")
+        assertTrue(run("bazelLib").buildAndFail().output.contains("has no runfiles tree"))
+    }
+
+    @Test fun `outputs resolving outside the workspace and output base are refused`() {
+        setup()
+        val outside = File(dir.parentFile, "outside-${dir.name}.txt").apply { writeText("secret") }
+        try {
+            File(dir, "execroot").mkdirs()
+            java.nio.file.Files.createSymbolicLink(File(dir, "execroot/leak").toPath(), outside.toPath())
+            File(dir, "output-files").writeText("leak")
+            assertTrue(run("bazelLib").buildAndFail().output.contains("resolves outside the Bazel workspace"))
+        } finally { outside.delete() }
+    }
+
     @Test fun `invalid configs fail with clear messages`() {
         setup("remoteCacheUrl.set(\"s3://bucket/prefix\")")
         assertTrue(run("bazelLib").buildAndFail().output.contains("Bazel cannot talk to s3:// directly"))
@@ -217,5 +286,7 @@ class BazelBuildFunctionalTest {
         assertTrue(run("bazelLib").buildAndFail().output.contains("buildArgs must not contain"))
         setup("remoteCacheUrl.set(\"http://x\"); bazelRemote { enabled.set(true); s3Bucket.set(\"b\"); s3Endpoint.set(\"h\") }")
         assertTrue(run("bazelLib").buildAndFail().output.contains("not both"))
+        setup("bazelRemote { enabled.set(true); s3Bucket.set(\"b\"); s3Endpoint.set(\"h\"); authMethod.set(\"anonymous\") }")
+        assertTrue(run("bazelLib").buildAndFail().output.contains("authMethod must be one of"))
     }
 }

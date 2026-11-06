@@ -1,0 +1,6 @@
+genrule(
+    name = "gen",
+    srcs = ["src.txt"],
+    outs = ["gen.txt"],
+    cmd = "cat $< > $@ && echo generated >> $@",
+)

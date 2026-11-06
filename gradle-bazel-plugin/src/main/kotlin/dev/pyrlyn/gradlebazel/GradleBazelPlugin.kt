@@ -3,6 +3,7 @@ package dev.pyrlyn.gradlebazel
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.provider.Property
 
 abstract class GradleBazelExtension {
@@ -32,6 +33,14 @@ abstract class BazelRemoteExtension {
     abstract val s3Prefix: Property<String>
     abstract val s3Region: Property<String>
     abstract val disableSsl: Property<Boolean>
+    /** `access_key` (default, from S3_CACHE_* env), `iam_role` or `aws_credentials_file`. Not fingerprinted. */
+    abstract val authMethod: Property<String>
+    /** iam_role: credentials endpoint, e.g. `http://169.254.169.254`. Default: standard AWS locations. */
+    abstract val iamRoleEndpoint: Property<String>
+    /** aws_credentials_file: path to an AWS shared credentials file outside the repository. */
+    abstract val credentialsFile: RegularFileProperty
+    /** aws_credentials_file: profile inside [credentialsFile]. */
+    abstract val awsProfile: Property<String>
 }
 
 class GradleBazelPlugin : Plugin<Project> {
@@ -48,6 +57,7 @@ class GradleBazelPlugin : Plugin<Project> {
         br.port.convention(9090)
         br.s3Prefix.convention("bazel-remote")
         br.disableSsl.convention(false)
+        br.authMethod.convention(BazelRemoteSettings.ACCESS_KEY)
 
         val service = project.gradle.sharedServices.registerIfAbsent(
             "bazelRemote-" + project.path, BazelRemoteService::class.java,
@@ -63,6 +73,10 @@ class GradleBazelPlugin : Plugin<Project> {
             spec.parameters.s3Region.set(br.s3Region)
             spec.parameters.disableSsl.set(br.disableSsl)
             spec.parameters.upload.set(ext.remoteUpload)
+            spec.parameters.authMethod.set(br.authMethod)
+            spec.parameters.iamRoleEndpoint.set(br.iamRoleEndpoint)
+            spec.parameters.credentialsFile.set(br.credentialsFile.map { it.asFile.absolutePath })
+            spec.parameters.awsProfile.set(br.awsProfile)
             spec.parameters.logFile.set(project.layout.buildDirectory.file("bazel-remote/bazel-remote.log").map { it.asFile.absolutePath })
         }
 

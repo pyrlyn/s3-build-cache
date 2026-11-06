@@ -1,0 +1,2 @@
+# No bazel_dep on purpose: pure Starlark rules keep the e2e workspace small and offline after the first fetch.
+module(name = "gradle_bazel_e2e")
