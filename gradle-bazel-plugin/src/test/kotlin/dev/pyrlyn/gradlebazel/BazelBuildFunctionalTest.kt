@@ -11,19 +11,31 @@ import java.io.File
 class BazelBuildFunctionalTest {
     @TempDir lateinit var dir: File
 
-    private fun setup(extension: String = "", task: String = "assumeHermetic.set(true)") {
+    private fun setup(extension: String = "", task: String = "assumeHermetic.set(true)", explicitInputs: Boolean = true) {
         val execroot = File(dir, "execroot").apply { mkdirs() }
         File(dir, "fake-bazel").apply {
             writeText(
                 """
                 #!/bin/sh
                 echo "$*" >> "${dir.absolutePath}/calls.log"
-                cmd=""; for a in "$@"; do case "${'$'}a" in build|cquery|info) cmd="${'$'}a"; break;; esac; done
+                cmd=""; for a in "$@"; do case "${'$'}a" in build|cquery|info|query) cmd="${'$'}a"; break;; esac; done
                 case "${'$'}cmd" in
                   info) echo "${execroot.absolutePath}" ;;
                   build) mkdir -p "${execroot.absolutePath}/bazel-out/bin/lib"
                          cat "${dir.absolutePath}/ws/src/nested/src.kt" > "${execroot.absolutePath}/bazel-out/bin/lib/lib.jar" ;;
-                  cquery) echo "bazel-out/bin/lib/lib.jar" ;;
+                  cquery) case "$*" in
+                            *--output=label*)
+                              test ! -f "${dir.absolutePath}/fail-query" || exit 7
+                              if test -f "${dir.absolutePath}/source-labels"; then
+                                cat "${dir.absolutePath}/source-labels"
+                              else
+                                echo '//src:nested/src.kt (null)'
+                                echo '@@compiler+//:downloaded.jar (null)'
+                              fi ;;
+                            *) echo "bazel-out/bin/lib/lib.jar" ;;
+                          esac ;;
+                  query) test ! -f "${dir.absolutePath}/fail-metadata" || exit 8
+                         echo '//src:BUILD.bazel'; echo '//defs:rules.bzl'; echo '//defs:BUILD.bazel' ;;
                 esac
                 """.trimIndent() + "\n"
             )
@@ -31,6 +43,10 @@ class BazelBuildFunctionalTest {
         }
         File(dir, "ws/src/nested").mkdirs()
         File(dir, "ws/src/nested/src.kt").writeText("v1")
+        File(dir, "ws/src/BUILD.bazel").writeText("# build")
+        File(dir, "ws/defs").mkdirs()
+        File(dir, "ws/defs/rules.bzl").writeText("# extension")
+        File(dir, "ws/defs/BUILD.bazel").writeText("# definitions")
         File(dir, "ws/MODULE.bazel").writeText("module(name = \"t\")")
         File(dir, "settings.gradle.kts").writeText(
             "rootProject.name = \"t\"\nbuildCache { local { directory = file(\"${File(dir, "gradle-cache").absolutePath}\") } }"
@@ -51,7 +67,7 @@ class BazelBuildFunctionalTest {
                 outputGroups.add(providers.gradleProperty("og").orElse("default"))
                 startupArgs.add(providers.gradleProperty("startup").orElse("--host_jvm_args=-Xmx1g"))
                 outputUserRoot.set(providers.gradleProperty("root").orElse("/tmp/root-a"))
-                inputFiles.from(layout.projectDirectory.dir("ws/src"))
+                ${if (explicitInputs) "inputFiles.from(layout.projectDirectory.dir(\"ws/src\"))" else ""}
                 $task
             }
             configurations.consumable("bazelJars")
@@ -86,6 +102,83 @@ class BazelBuildFunctionalTest {
         assertEquals("v2", out.readText())
         File(dir, "ws/MODULE.bazel").writeText("module(name = \"t2\")")
         assertEquals(TaskOutcome.SUCCESS, outcome(), "workspace config files are fingerprinted")
+    }
+
+    @Test fun `automatic sources and loaded definitions invalidate but unrelated files do not`() {
+        setup(explicitInputs = false)
+        assertEquals(TaskOutcome.SUCCESS, outcome("--build-cache"))
+        assertEquals(TaskOutcome.UP_TO_DATE, outcome("--build-cache"))
+        File(dir, "ws/src/unrelated.kt").writeText("not a dependency")
+        assertEquals(TaskOutcome.UP_TO_DATE, outcome())
+        File(dir, "ws/src/nested/src.kt").writeText("auto-v2")
+        assertEquals(TaskOutcome.SUCCESS, outcome("--build-cache"))
+        assertEquals("auto-v2", File(dir, "build/bazel/bazelLib/lib.jar").readText())
+        File(dir, "build").deleteRecursively()
+        assertEquals(TaskOutcome.FROM_CACHE, outcome("--build-cache"))
+        assertEquals("auto-v2", File(dir, "build/bazel/bazelLib/lib.jar").readText())
+        for (path in listOf("src/BUILD.bazel", "defs/rules.bzl", "defs/BUILD.bazel")) {
+            File(dir, "ws/$path").appendText("\n# changed")
+            assertEquals(TaskOutcome.SUCCESS, outcome(), path)
+        }
+        assertTrue(calls.contains("cquery -c opt --output_groups=default --output=label -- kind("), calls)
+        assertTrue(calls.contains("query --output=label -- buildfiles(deps("), calls)
+    }
+
+    @Test fun `discovered relative paths participate in the cache key`() {
+        setup(explicitInputs = false)
+        File(dir, "ws/other").mkdirs()
+        File(dir, "ws/other/src.kt").writeText("v1")
+        assertEquals(TaskOutcome.SUCCESS, outcome("--build-cache"))
+        File(dir, "source-labels").writeText("//other:src.kt (null)")
+        assertEquals(TaskOutcome.SUCCESS, outcome("--build-cache"), "same basename and content, different path")
+    }
+
+    @Test fun `equal basenames retain their path and content association`() {
+        setup(explicitInputs = false)
+        File(dir, "ws/other").mkdirs()
+        File(dir, "ws/other/src.kt").writeText("v2")
+        File(dir, "source-labels").writeText("//src:nested/src.kt (null)\n//other:src.kt (null)")
+        assertEquals(TaskOutcome.SUCCESS, outcome("--build-cache"))
+        File(dir, "ws/src/nested/src.kt").writeText("v2")
+        File(dir, "ws/other/src.kt").writeText("v1")
+        assertEquals(TaskOutcome.SUCCESS, outcome("--build-cache"))
+        assertEquals("v2", File(dir, "build/bazel/bazelLib/lib.jar").readText())
+    }
+
+    @Test fun `explicit inputs remain additive and discovery can be disabled`() {
+        setup(task = "discoverSourceInputs.set(false)")
+        assertEquals(TaskOutcome.SUCCESS, outcome())
+        assertEquals(TaskOutcome.UP_TO_DATE, outcome())
+        File(dir, "ws/src/nested/src.kt").writeText("explicit-v2")
+        assertEquals(TaskOutcome.SUCCESS, outcome())
+        assertFalse(calls.contains("--output=label"), calls)
+        setup(task = "inputFiles.from(layout.projectDirectory.file(\"extra.txt\"))", explicitInputs = false)
+        File(dir, "extra.txt").writeText("first")
+        assertEquals(TaskOutcome.SUCCESS, outcome())
+        File(dir, "extra.txt").writeText("second")
+        assertEquals(TaskOutcome.SUCCESS, outcome())
+    }
+
+    @Test fun `failed discovery never reuses up to date output or build cache`() {
+        setup(explicitInputs = false)
+        assertEquals(TaskOutcome.SUCCESS, outcome("--build-cache"))
+        for (marker in listOf("fail-query", "fail-metadata")) {
+            val file = File(dir, marker).apply { writeText("fail") }
+            val result = run("bazelLib", "--build-cache").buildAndFail()
+            assertTrue(result.output.contains("refusing an incomplete input snapshot"), result.output)
+            assertEquals(1, calls.lines().count { " build " in it })
+            file.delete()
+        }
+    }
+
+    @Test fun `invalid and escaping discovered inputs fail closed`() {
+        setup(explicitInputs = false)
+        for (label in listOf("//src:../../outside", "//src:missing.kt", "nonsense")) {
+            File(dir, "source-labels").writeText(label)
+            val result = run("bazelLib").buildAndFail()
+            assertTrue(result.output.contains("refusing an incomplete input snapshot"), result.output)
+        }
+        assertFalse(calls.lines().any { " build " in it })
     }
 
     @Test fun `remote cache identity and upload mode are fingerprinted`() {

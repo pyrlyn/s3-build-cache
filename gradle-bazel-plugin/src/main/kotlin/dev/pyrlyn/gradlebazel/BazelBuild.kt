@@ -4,6 +4,7 @@ import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
 import org.gradle.api.file.ConfigurableFileCollection
 import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.file.FileTree
 import org.gradle.api.provider.ListProperty
 import org.gradle.api.provider.MapProperty
 import org.gradle.api.provider.Property
@@ -16,8 +17,8 @@ import java.nio.file.StandardCopyOption
  * Runs `bazel build` for explicit target labels and copies each target's default output files
  * (resolved with `bazel cquery --output=files`) into [outputDirectory].
  *
- * Gradle up-to-date checks and build caching are only as correct as [inputFiles]: declare every
- * source/BUILD/MODULE file the targets depend on.
+ * Local sources and package definitions are discovered before Gradle snapshots inputs.
+ * [inputFiles] supplies additional dependencies not represented in the Bazel graph.
  */
 @CacheableTask
 abstract class BazelBuild : DefaultTask() {
@@ -41,6 +42,21 @@ abstract class BazelBuild : DefaultTask() {
     /** Directories are fingerprinted recursively by file content and relative path. */
     @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE) @get:IgnoreEmptyDirectories
     abstract val inputFiles: ConfigurableFileCollection
+    /** Discover main-workspace source and package definition files before up-to-date/cache checks. */
+    @get:Input abstract val discoverSourceInputs: Property<Boolean>
+    private val discoveredPaths by lazy { discoverInputs() }
+    /** Stable workspace-relative membership, without configuration hashes or external labels. */
+    @get:Input val discoveredSourcePaths: List<String>
+        get() = discoveredPaths
+    @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE)
+    val discoveredSourceFiles: FileTree
+        get() = project.fileTree(workspaceDirectory.get().asFile) {
+            // Anchor normalization at the workspace, not each file: equally named files in
+            // different packages must retain their path/content association in the cache key.
+            it.setIncludes(discoveredPaths)
+            if (discoveredPaths.isEmpty()) it.exclude("**")
+        }
+
     /** Workspace config that always affects results (.bazelversion, MODULE.bazel[.lock], .bazelrc), if present. */
     @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE) @get:Optional
     val workspaceConfigFiles: List<File>
@@ -69,7 +85,25 @@ abstract class BazelBuild : DefaultTask() {
         remoteUpload.convention(false)
         useManagedBazelRemote.convention(false)
         assumeHermetic.convention(false)
+        discoverSourceInputs.convention(true)
         outputs.cacheIf("assumeHermetic is true") { assumeHermetic.get() }
+    }
+
+    private fun discoverInputs(): List<String> {
+        if (!discoverSourceInputs.get()) return emptyList()
+        try {
+            BazelCommands.validateArgs(startupArgs.get(), buildArgs.get())
+            BazelCommands.validate(targets.get(), outputNames.get(), null)
+            val ws = workspaceDirectory.get().asFile
+            val startup = listOfNotNull(outputUserRoot.orNull?.let { "--output_user_root=$it" }) + startupArgs.get()
+            val args = buildArgs.get() + BazelCommands.outputGroupFlags(outputGroups.get())
+            val sources = exec(ws, BazelCommands.sourceInputs(executable.get(), startup, args, targets.get()))
+            val definitions = exec(ws, BazelCommands.buildFiles(executable.get(), startup, targets.get()))
+            return BazelSourceInputs.resolve(ws, (sources + "\n" + definitions).lines())
+        } catch (e: Exception) {
+            throw GradleException("Bazel source input discovery failed; refusing an incomplete input snapshot. " +
+                "Fix the query or set discoverSourceInputs=false and declare all inputs explicitly in inputFiles.", e)
+        }
     }
 
     @TaskAction

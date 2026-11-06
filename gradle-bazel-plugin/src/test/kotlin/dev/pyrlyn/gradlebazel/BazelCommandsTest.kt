@@ -22,6 +22,16 @@ class BazelCommandsTest {
             BazelCommands.cqueryFiles("bazel", emptyList(), listOf("-c", "opt"), "//a:b"))
     }
 
+    @Test fun `discovery uses configured deps and unconfigured build definitions for multiple labels`() {
+        val targets = listOf("//a:b", "//c:d")
+        assertEquals(listOf("bazel", "--batch", "cquery", "--config=ci", "--output=label", "--",
+            "kind(\"source file\", deps(set(\"//a:b\" \"//c:d\")))"),
+            BazelCommands.sourceInputs("bazel", listOf("--batch"), listOf("--config=ci"), targets))
+        assertEquals(listOf("bazel", "--batch", "query", "--output=label", "--",
+            "buildfiles(deps(set(\"//a:b\" \"//c:d\")))"),
+            BazelCommands.buildFiles("bazel", listOf("--batch"), targets))
+    }
+
     @Test fun `rejects invalid configs`() {
         assertThrows<IllegalArgumentException> { BazelCommands.validate(emptyList(), emptyMap(), null) }
         assertThrows<IllegalArgumentException> { BazelCommands.validate(listOf("hello"), emptyMap(), null) }

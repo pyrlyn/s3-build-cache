@@ -26,27 +26,27 @@ bazel {
     }
 }
 
-// Files every target depends on. Keep this explicit: a whole-workspace glob also hashes bazel-* symlinks.
-val bazelConfig = files("MODULE.bazel", ".bazelversion", ".bazelrc", "third_party")
+// Repository-rule inputs referenced by MODULE.bazel are outside the target source graph.
+val repositoryInputs = files("third_party")
 
-fun registerBazel(name: String, label: String, dir: String, configure: BazelBuild.() -> Unit = {}) =
+fun registerBazel(name: String, label: String, configure: BazelBuild.() -> Unit = {}) =
     tasks.register<BazelBuild>(name) {
         description = "Builds $label with Bazel"
         targets.add(label)
-        inputFiles.from(bazelConfig, dir)
+        inputFiles.from(repositoryInputs)
         outputUserRoot.set(providers.gradleProperty("bazel.outputUserRoot"))
-        // Inputs below fully determine these outputs, so Gradle and Bazel caching are allowed.
+        // Sample opt-in: pinned repositories plus the assumed host toolchain; see README boundaries.
         assumeHermetic.set(true)
         configure()
     }
 
-val bazelC = registerBazel("bazelC", "//c:hello", "c")
-val bazelKotlinJvm = registerBazel("bazelKotlinJvm", "//kotlin/jvm:hello.jar", "kotlin/jvm") {
+val bazelC = registerBazel("bazelC", "//c:hello")
+val bazelKotlinJvm = registerBazel("bazelKotlinJvm", "//kotlin/jvm:hello.jar") {
     outputNames.put("//kotlin/jvm:hello.jar", "hello-kotlin-jvm.jar")
 }
-val bazelKotlinJs = registerBazel("bazelKotlinJs", "//kotlin/js:hello", "kotlin/js")
-val bazelKotlinWasm = registerBazel("bazelKotlinWasm", "//kotlin/wasm:hello", "kotlin/wasm")
-val bazelKotlinNative = registerBazel("bazelKotlinNative", "//kotlin/native:hello", "kotlin/native") {
+val bazelKotlinJs = registerBazel("bazelKotlinJs", "//kotlin/js:hello")
+val bazelKotlinWasm = registerBazel("bazelKotlinWasm", "//kotlin/wasm:hello")
+val bazelKotlinNative = registerBazel("bazelKotlinNative", "//kotlin/native:hello") {
     // NOT hermetic: kotlinc-native downloads LLVM/sysroots into KONAN_DATA_DIR and links with host Xcode,
     // none of which is fingerprinted. So: no Gradle build cache store/restore, no Bazel remote cache.
     // Future hook: pin known konan dependency/toolchain hashes as inputs, then flip this to true.
