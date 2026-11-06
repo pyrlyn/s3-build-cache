@@ -100,3 +100,7 @@ Artifacts are the Gradle plugin JAR (`dev.pyrlyn:s3-build-cache`).
 | Gradle Plugin Portal / Maven Central | not configured yet (would be the usual public destinations for a Gradle plugin once Portal/OSSRH credentials exist) |
 
 E2E defaults to image `cgr.dev/chainguard/minio:latest` (official `minio/minio` images no longer pull from Docker Hub). Override with `-De2e.minioImage=...` or `MINIO_IMAGE`. For Colima the Docker socket is picked up automatically.
+
+## Experimental: Gradle -> Bazel bridge
+
+See [`gradle-bazel-plugin/`](gradle-bazel-plugin/README.md) for an experimental, separate plugin (`dev.pyrlyn.gradle-bazel`) that runs Bazel targets from Gradle with an optional S3-backed Bazel remote cache. It does not change this plugin.

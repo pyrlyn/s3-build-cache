@@ -1,0 +1,1 @@
+exports_files(["kotlin_compiler.BUILD", "kotlin_native.BUILD"])

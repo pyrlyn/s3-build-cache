@@ -1,0 +1,25 @@
+module(name = "gradle_bazel_sample")
+
+bazel_dep(name = "platforms", version = "1.1.0")
+bazel_dep(name = "rules_cc", version = "0.2.27")
+bazel_dep(name = "rules_kotlin", version = "2.4.21")
+
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+# Official JetBrains compiler distribution; used for Kotlin/JS and Kotlin/Wasm (no Bazel rules exist for them).
+http_archive(
+    name = "kotlin_compiler",
+    build_file = "//third_party:kotlin_compiler.BUILD",
+    sha256 = "7cc140e76daf416a0424a5557f99afd7ca89ebd463ea1101261e3e01c33e75cd",
+    strip_prefix = "kotlinc",
+    url = "https://github.com/JetBrains/kotlin/releases/download/v2.4.21/kotlin-compiler-2.4.21.zip",
+)
+
+# Official Kotlin/Native prebuilt for macOS arm64 only. There is no maintained Bazel rule set for Kotlin/Native.
+http_archive(
+    name = "kotlin_native_macos_arm64",
+    build_file = "//third_party:kotlin_native.BUILD",
+    sha256 = "bf4edb526d91e17d0862102f69250525d788e79011f86c2c64362749adf260ae",
+    strip_prefix = "kotlin-native-prebuilt-macos-aarch64-2.4.21",
+    url = "https://github.com/JetBrains/kotlin/releases/download/v2.4.21/kotlin-native-prebuilt-macos-aarch64-2.4.21.tar.gz",
+)

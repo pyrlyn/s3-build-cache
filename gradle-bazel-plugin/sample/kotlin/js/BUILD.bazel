@@ -1,0 +1,21 @@
+# No Bazel rule set supports Kotlin/JS (rules_kotlin removed kt_js_*), so this is a thin genrule
+# around the official kotlinc-js: source -> klib -> JS. Needs a JDK on PATH (not hermetic).
+genrule(
+    name = "hello",
+    srcs = ["hello.kt"],
+    outs = ["hello.js"],
+    cmd = """
+set -eu
+KC=$(location @kotlin_compiler//:bin/kotlinc-js)
+STD=$(location @kotlin_compiler//:lib/kotlin-stdlib-js.klib)
+W=$(RULEDIR)/_work
+"$$KC" -libraries "$$STD" -ir-output-dir "$$W" -ir-output-name hello $(location hello.kt) >/dev/null
+"$$KC" -libraries "$$STD:$$W/hello.klib" -Xir-produce-js -Xinclude="$$W/hello.klib" -ir-output-dir "$$W/js" -ir-output-name hello >/dev/null
+cp "$$W/js/hello.js" $@
+""",
+    tools = [
+        "@kotlin_compiler//:bin/kotlinc-js",
+        "@kotlin_compiler//:lib/kotlin-stdlib-js.klib",
+        "@kotlin_compiler//:dist",
+    ],
+)
