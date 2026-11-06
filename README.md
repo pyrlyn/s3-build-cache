@@ -84,14 +84,15 @@ Without `maxSizeBytes` the plugin deletes nothing. Configure a bucket lifecycle 
 ## Build
 ```
 ./gradlew build                 # compile and unit tests (MockK + in-process fake S3)
-./gradlew e2eTest               # e2e against real MinIO (Testcontainers); skipped without Docker
+./gradlew e2eTest               # e2e: real MinIO (Testcontainers), plus real Bazel/bazel-remote for gradle-bazel; skipped without Docker or tools (`mise install`)
 ./gradlew publishToMavenLocal   # local Maven publish
 ./gradlew publish               # publish to GitHub Packages (CI; needs credentials)
 cd example && ../gradlew help   # verify the plugin resolves
 ```
 
 ## Publishing
-Artifacts are the Gradle plugin JAR (`dev.pyrlyn:s3-build-cache`).
+
+Both plugins are published: `dev.pyrlyn:s3-build-cache` and `dev.pyrlyn:gradle-bazel-plugin`, each with its plugin marker.
 
 | Target | When |
 |---|---|
@@ -101,6 +102,6 @@ Artifacts are the Gradle plugin JAR (`dev.pyrlyn:s3-build-cache`).
 
 E2E defaults to image `cgr.dev/chainguard/minio:latest` (official `minio/minio` images no longer pull from Docker Hub). Override with `-De2e.minioImage=...` or `MINIO_IMAGE`. For Colima the Docker socket is picked up automatically.
 
-## Experimental: Gradle -> Bazel bridge
+## Gradle -> Bazel bridge
 
-See [`gradle-bazel-plugin/`](gradle-bazel-plugin/README.md) for an experimental, separate plugin (`dev.pyrlyn.gradle-bazel`) that runs Bazel targets from Gradle with an optional S3-backed Bazel remote cache. It does not change this plugin.
+See [`gradle-bazel-plugin/`](gradle-bazel-plugin/README.md) for a separate plugin (`dev.pyrlyn.gradle-bazel`) that runs Bazel targets from Gradle with an optional S3-backed Bazel remote cache. It does not change this plugin.

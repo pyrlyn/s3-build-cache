@@ -1,4 +1,4 @@
-# dev.pyrlyn.gradle-bazel (experimental MVP)
+# dev.pyrlyn.gradle-bazel
 
 A small Gradle plugin that runs explicit Bazel targets from Gradle and exposes their output
 files as ordinary Gradle task outputs / artifacts, with an optional Bazel remote cache backed by
@@ -27,6 +27,7 @@ val bazelLib = tasks.register<BazelBuild>("bazelLib") {
     outputUserRoot.set("/path/on/this/machine")                    // normalized out of the fingerprint
     inputFiles.from("bazel/third_party")                          // additional repository-rule inputs
     assumeHermetic.set(true)                                       // opt in to caching, see below
+    includeRunfiles.set(true)                                      // also copy <exe>.runfiles (executables)
 }
 
 // Consume it like any other file/artifact:
@@ -35,14 +36,28 @@ dependencies { implementation(files(bazelLib.map { it.outputDirectory.file("hell
 
 Outputs land in `build/bazel/<taskName>/` (override with `outputDirectory`).
 
+Published to GitHub Packages as `dev.pyrlyn:gradle-bazel-plugin` with the plugin marker
+`dev.pyrlyn.gradle-bazel` (Maven repo `https://maven.pkg.github.com/pyrlyn/s3-build-cache`).
+
 ## How it works
 
 0. Before Gradle up-to-date/cache checks, discover workspace inputs (see below).
 1. `bazel build <buildArgs> [remote flags] -- <targets>`
-2. `bazel info <buildArgs> execution_root`
+2. `bazel info <buildArgs> execution_root output_base install_base`
 3. For each target, `bazel cquery <buildArgs> --output=files -- <target>` lists the target's default
-   output files (paths relative to the execution root). Only those files are copied (not symlinked)
-   into the task output directory; paths that are absolute or contain `..` are rejected.
+   outputs (paths relative to the execution root). Files are copied (not symlinked) into the task
+   output directory; a tree artifact (directory output) is copied recursively into a directory of
+   the same name. With `includeRunfiles`, the `<file>.runfiles` tree next to each executable output
+   is copied to `<name>.runfiles/` so the executable runs from the Gradle output.
+
+Copies dereference symlinks: Gradle outputs and build cache entries never point back into a
+machine-local Bazel output base. Every copied path, and every symlink target inside a tree or
+runfiles, must resolve under the workspace, the output base or the install base; anything else
+(a symlink to a host file, a dangling link, a cycle) fails the task. Paths from cquery that are
+absolute or contain `..` are rejected. The runfiles `MANIFEST` is not copied because it lists
+absolute machine paths; runfiles libraries fall back to the directory layout. Runfiles of
+external repositories that live outside the output base (e.g. `local_path_override` pointing
+outside the workspace) are refused by the same rule.
 
 `cquery --output=files` was chosen over the Build Event Protocol because it is a single, stable
 command per target, honours the same configuration flags, and needs no JSON/proto parsing.
@@ -105,6 +120,13 @@ local UP-TO-DATE checks still apply. Set it to `true` only when declared inputs 
 outputs. Toolchains that download things at action time (Kotlin/Native's `KONAN_DATA_DIR`) are not
 hermetic; a future hook could pin known dependency/sysroot hashes as inputs.
 
+## Configuration cache
+
+`BazelBuild` and the managed bazel-remote service are compatible with Gradle's configuration
+cache. Source discovery is never part of a configuration cache entry: Bazel is queried when task
+inputs are snapshotted, also when an entry is reused, so a source edit still reruns the task.
+Credentials are read from the environment when bazel-remote starts, so they never enter an entry.
+
 ## Remote cache on S3
 
 Bazel cannot talk to S3 directly (`--remote_cache=s3://...` does not exist). Two options:
@@ -139,10 +161,17 @@ bazel {
 }
 ```
 
-Credentials come only from the environment, using the same names as the s3-build-cache example
-(`S3_CACHE_ACCESS_KEY_ID`, `S3_CACHE_SECRET_ACCESS_KEY`, optional `S3_CACHE_SESSION_TOKEN`). They
-are passed to the child process as `BAZEL_REMOTE_S3_*` environment variables, never as arguments,
-log lines, or task inputs. Only `--s3.auth_method=access_key` is wired up in this MVP.
+Authentication (`bazelRemote.authMethod`, the values of bazel-remote's `--s3.auth_method`):
+
+| `authMethod` | Credentials | Extra settings |
+|---|---|---|
+| `access_key` (default) | Environment only, same names as the s3-build-cache example: `S3_CACHE_ACCESS_KEY_ID`, `S3_CACHE_SECRET_ACCESS_KEY`, optional `S3_CACHE_SESSION_TOKEN`. Missing keys fail the task before bazel-remote starts. | — |
+| `iam_role` | Standard AWS locations (EC2/ECS metadata, web identity) as resolved by bazel-remote | `iamRoleEndpoint` (optional) |
+| `aws_credentials_file` | An AWS shared credentials file outside the repository | `credentialsFile`, `awsProfile` (both optional; bazel-remote defaults to `~/.aws/credentials` / `default`) |
+
+Keys are passed to the child process as `BAZEL_REMOTE_S3_*` environment variables, never as
+arguments, log lines, or task inputs; a credentials file is passed by path only. The auth method
+does not change the cache identity, so switching it does not invalidate tasks.
 
 Same bucket, **not** the same keys: Gradle's cache entries and Bazel's AC/CAS entries use
 unrelated key schemes. Sharing a bucket (with distinct prefixes) saves infrastructure, it does not
@@ -190,14 +219,15 @@ cd gradle-bazel-plugin/sample
 ## Limitations
 
 - Explicit labels only; no `//...`, `:all`, or `*`. One task can list several targets.
-- Default outputs unless `outputGroups` is set; no runfiles or tree artifacts (directories fail fast).
-  Name an implicit output file (e.g. `:hello.jar`) to pick one file of a multi-output rule.
+- Default outputs unless `outputGroups` is set. Name an implicit output file (e.g. `:hello.jar`)
+  to pick one file of a multi-output rule.
 - One configuration per task: multi-platform builds need one task per `--platforms` value.
-- Runfiles are not copied; executables that need runfiles will not run from the Gradle output.
+- Runfiles are copied as a directory tree only (no manifest), and only with `includeRunfiles`;
+  with `--nobuild_runfile_links` there is no tree to copy and the task fails.
 - Hermeticity of `genrule` wrappers that use the host JDK is assumed, not enforced.
 - Bazel runs serially per Gradle build (the managed bazel-remote service has one usage slot, and
   Bazel's server locks the output base anyway).
-- No Gradle configuration cache support. Automatic queries cover local graph files, not full toolchains.
+- Automatic queries cover local graph files, not full toolchains.
 - The plugin does not download Bazel or bazel-remote.
 
 ## Tests
@@ -208,4 +238,15 @@ identity and config validation; TestKit tests use a fake `bazel` script to check
 forwarding, the exported artifact, UP-TO-DATE, which settings do/do not invalidate the task,
 Gradle build cache restore for hermetic tasks and no caching for non-hermetic ones. Discovery
 tests cover source/BUILD/loaded-extension edits, unrelated files, additive explicit inputs,
-opt-out and fail-closed query errors/unsafe paths.
+opt-out and fail-closed query errors/unsafe paths; further tests cover the configuration cache,
+tree artifacts, runfiles, output containment and bazel-remote auth settings.
+
+`./gradlew :gradle-bazel-plugin:e2eTest` drives real tools: bazelisk with the Bazel version pinned
+in `src/e2eTest/workspace/.bazelversion`, bazel-remote and MinIO (Testcontainers). Install the
+tools with `mise install` (versions in the root `mise.toml`); tests skip when a tool or Docker is
+missing. Scenarios: genrule build, UP-TO-DATE, source/BUILD/`.bzl` edits and unrelated edits,
+tree artifact, runfiles executable run from the Gradle output, build cache restore at another
+project path, configuration cache reuse with rediscovery, fail-closed broken BUILD; managed
+bazel-remote uploading to MinIO, remote cache hits from a fresh workspace authenticated with an
+AWS credentials file, read-only mode writing nothing, non-hermetic tasks bypassing the remote
+cache, and missing access keys failing without leaking secrets.
