@@ -25,27 +25,51 @@ abstract class BazelBuild : DefaultTask() {
     @get:Input abstract val targets: ListProperty<String>
     /** Optional label -> file name rename for targets that produce exactly one file. */
     @get:Input abstract val outputNames: MapProperty<String, String>
-    /** Build flags (e.g. `-c opt`, `--config=ci`). Part of the fingerprint; also passed to cquery. */
+    /** Build flags (e.g. `-c opt`, `--config=ci`). Fingerprinted; also passed to info/cquery. */
     @get:Input abstract val buildArgs: ListProperty<String>
-    /** Startup options (e.g. `--output_user_root=...`). Machine-local, not fingerprinted. */
-    @get:Internal abstract val startupArgs: ListProperty<String>
+    /** `--output_groups=` value(s) used for both build and cquery. Empty = default outputs. */
+    @get:Input abstract val outputGroups: ListProperty<String>
+    /** Startup options other than the output root. Fingerprinted. */
+    @get:Input abstract val startupArgs: ListProperty<String>
+    /** `--output_user_root`: machine-local location only, normalized out of the fingerprint. */
+    @get:Internal abstract val outputUserRoot: Property<String>
     @get:Internal abstract val workspaceDirectory: DirectoryProperty
+    /** Workspace location relative to the root project (portable across machines). */
+    @get:Internal abstract val rootDirectory: DirectoryProperty
+    @get:Input val workspacePath: String
+        get() = rootDirectory.get().asFile.toPath().relativize(workspaceDirectory.get().asFile.toPath()).toString().replace('\\', '/')
+    /** Directories are fingerprinted recursively by file content and relative path. */
     @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE) @get:IgnoreEmptyDirectories
     abstract val inputFiles: ConfigurableFileCollection
+    /** Workspace config that always affects results (.bazelversion, MODULE.bazel[.lock], .bazelrc), if present. */
+    @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE) @get:Optional
+    val workspaceConfigFiles: List<File>
+        get() = listOf(".bazelversion", "MODULE.bazel", "MODULE.bazel.lock", ".bazelrc", "WORKSPACE", "WORKSPACE.bazel")
+            .map { File(workspaceDirectory.get().asFile, it) }.filter { it.isFile }
     @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
 
-    /** Remote cache endpoint (externally managed or the plugin-managed bazel-remote). Not fingerprinted. */
+    /**
+     * Acknowledge that the declared inputs fully determine the outputs. Default false: the task is
+     * neither stored in nor restored from the Gradle build cache and Bazel runs without a remote cache.
+     */
+    @get:Input abstract val assumeHermetic: Property<Boolean>
+
+    /** Non-secret identity of the remote cache (endpoint/bucket/region/prefix/port/ssl). Fingerprinted. */
+    @get:Input @get:Optional abstract val remoteCacheIdentity: Property<String>
+    @get:Input abstract val remoteUpload: Property<Boolean>
     @get:Internal abstract val remoteCacheUrl: Property<String>
-    @get:Internal abstract val remoteUpload: Property<Boolean>
     @get:Internal abstract val bazelRemote: Property<BazelRemoteService>
     @get:Internal abstract val useManagedBazelRemote: Property<Boolean>
 
     init {
         outputNames.convention(emptyMap())
         buildArgs.convention(emptyList())
+        outputGroups.convention(emptyList())
         startupArgs.convention(emptyList())
         remoteUpload.convention(false)
         useManagedBazelRemote.convention(false)
+        assumeHermetic.convention(false)
+        outputs.cacheIf("assumeHermetic is true") { assumeHermetic.get() }
     }
 
     @TaskAction
@@ -53,9 +77,25 @@ abstract class BazelBuild : DefaultTask() {
         val exe = executable.get()
         val ts = targets.get()
         val names = outputNames.get()
-        val startup = startupArgs.get()
-        val args = buildArgs.get()
-        val url = if (useManagedBazelRemote.get()) bazelRemote.get().ensureStarted() else remoteCacheUrl.orNull
+        val startup = listOfNotNull(outputUserRoot.orNull?.let { "--output_user_root=$it" }) + startupArgs.get()
+        val args = buildArgs.get() + BazelCommands.outputGroupFlags(outputGroups.get())
+        val hermetic = assumeHermetic.get()
+        try {
+            BazelCommands.validateArgs(startupArgs.get(), buildArgs.get())
+            if (useManagedBazelRemote.get() && remoteCacheUrl.isPresent) {
+                throw IllegalArgumentException("set either bazel.remoteCacheUrl or bazel.bazelRemote.enabled, not both")
+            }
+        } catch (e: IllegalArgumentException) {
+            throw GradleException(e.message!!, e)
+        }
+        val url = when {
+            !hermetic -> null
+            useManagedBazelRemote.get() -> bazelRemote.get().ensureStarted()
+            else -> remoteCacheUrl.orNull
+        }
+        if (!hermetic && (useManagedBazelRemote.get() || remoteCacheUrl.isPresent)) {
+            logger.lifecycle("{}: assumeHermetic=false, Bazel remote cache disabled for this task", path)
+        }
         try {
             BazelCommands.validate(ts, names, url)
         } catch (e: IllegalArgumentException) {

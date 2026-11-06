@@ -15,6 +15,8 @@ data class BazelRemoteSettings(
     val s3Prefix: String,
     val s3Region: String?,
     val disableSsl: Boolean,
+    /** false = read-only: bazel-remote is started with --num_uploaders=0 so nothing is written to S3. */
+    val upload: Boolean = false,
 ) {
     init {
         require(maxSizeGb > 0) { "bazelRemote.maxSizeGb must be > 0" }
@@ -41,9 +43,16 @@ data class BazelRemoteSettings(
         "--s3.auth_method=access_key",
         s3Region?.let { "--s3.region=$it" },
         if (disableSsl) "--s3.disable_ssl" else null,
+        if (upload) null else "--num_uploaders=0",
     )
 
+    /** Non-secret identity for task fingerprints. */
+    val identity: String get() = identity(s3Endpoint, s3Bucket, s3Prefix, s3Region, disableSsl, httpPort, upload)
+
     companion object {
+        fun identity(endpoint: String?, bucket: String?, prefix: String?, region: String?, disableSsl: Boolean, port: Int, upload: Boolean) =
+            "bazel-remote:s3://$endpoint/$bucket/$prefix region=${region ?: ""} ssl=${!disableSsl} port=$port upload=$upload"
+
         /** Same variable names as the dev.pyrlyn.s3-build-cache example, mapped onto bazel-remote's env names. */
         fun credentialEnv(source: Map<String, String>): Map<String, String> {
             val out = mutableMapOf<String, String>()

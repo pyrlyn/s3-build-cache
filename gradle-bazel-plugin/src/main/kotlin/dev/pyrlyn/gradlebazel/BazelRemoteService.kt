@@ -24,6 +24,7 @@ abstract class BazelRemoteService : BuildService<BazelRemoteService.Params>, Aut
         val s3Prefix: Property<String>
         val s3Region: Property<String>
         val disableSsl: Property<Boolean>
+        val upload: Property<Boolean>
         val logFile: Property<String>
     }
 
@@ -35,14 +36,14 @@ abstract class BazelRemoteService : BuildService<BazelRemoteService.Params>, Aut
         val p = parameters
         val s = BazelRemoteSettings(
             p.executable.get(), p.cacheDir.get(), p.maxSizeGb.get(), p.port.get(),
-            p.s3Endpoint.get(), p.s3Bucket.get(), p.s3Prefix.get(), p.s3Region.orNull, p.disableSsl.get(),
+            p.s3Endpoint.get(), p.s3Bucket.get(), p.s3Prefix.get(), p.s3Region.orNull, p.disableSsl.get(), p.upload.get(),
         )
         if (process?.isAlive == true) return s.url
         File(s.cacheDir).mkdirs()
         val logFile = File(p.logFile.get()).also { it.parentFile.mkdirs() }
         val pb = ProcessBuilder(s.command()).redirectErrorStream(true).redirectOutput(logFile)
         pb.environment().putAll(BazelRemoteSettings.credentialEnv(System.getenv()))
-        log.lifecycle("Starting bazel-remote S3 proxy on ${s.url} (bucket ${s.s3Bucket}, prefix ${s.s3Prefix})")
+        log.lifecycle("Starting bazel-remote S3 proxy on ${s.url} (bucket ${s.s3Bucket}, prefix ${s.s3Prefix}, ${if (s.upload) "read-write" else "read-only"})")
         val proc = pb.start()
         process = proc
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)

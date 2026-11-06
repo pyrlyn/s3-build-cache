@@ -23,8 +23,10 @@ val bazelLib = tasks.register<BazelBuild>("bazelLib") {
     targets.add("//kotlin/jvm:hello.jar")                         // explicit labels only, no wildcards
     outputNames.put("//kotlin/jvm:hello.jar", "hello.jar")        // optional rename (single-file targets)
     buildArgs.addAll("-c", "opt")                                  // fingerprinted, also passed to cquery
-    startupArgs.add("--output_user_root=/path/on/this/machine")   // not fingerprinted
-    inputFiles.from("bazel/MODULE.bazel", "bazel/.bazelversion", "bazel/kotlin/jvm") // see "Inputs"
+    outputGroups.add("default")                                    // optional --output_groups, fingerprinted
+    outputUserRoot.set("/path/on/this/machine")                    // normalized out of the fingerprint
+    inputFiles.from("bazel/kotlin/jvm")                            // see "Inputs"
+    assumeHermetic.set(true)                                       // opt in to caching, see below
 }
 
 // Consume it like any other file/artifact:
@@ -44,18 +46,27 @@ Outputs land in `build/bazel/<taskName>/` (override with `outputDirectory`).
 `cquery --output=files` was chosen over the Build Event Protocol because it is a single, stable
 command per target, honours the same configuration flags, and needs no JSON/proto parsing.
 
-## Inputs, up-to-date checks and the Gradle build cache
+## Inputs, up-to-date checks and caching
 
-`BazelBuild` is `@CacheableTask`. Its fingerprint is: executable, targets, `outputNames`,
-`buildArgs`, and the content (relative paths) of `inputFiles`. Gradle only knows what you put in
-`inputFiles`, so declare every source, `BUILD`, `MODULE.bazel`, `.bazelversion` and `.bazelrc`
-the targets depend on. Pointing it at the whole workspace is correct but heavy (it hashes every
-file, including large trees) and must not include the `bazel-*` convenience symlinks. If you
-under-declare inputs the task can be wrongly UP-TO-DATE; Bazel itself still rebuilds correctly
-when the task does run.
+`BazelBuild` fingerprints: `executable`, `targets`, `outputNames`, `buildArgs`, `outputGroups`,
+`startupArgs`, the workspace path relative to the root project, `assumeHermetic`, the remote
+cache identity (external URL, or bazel-remote endpoint/bucket/region/prefix/port/ssl/upload) and
+`remoteUpload`, plus file contents of `inputFiles` and of the workspace config files
+(`.bazelversion`, `MODULE.bazel`, `MODULE.bazel.lock`, `.bazelrc`, `WORKSPACE[.bazel]`, when present).
+Directories in `inputFiles` are hashed recursively by file content and path relative to the
+directory, never by absolute path. Only `outputUserRoot` (machine-local location) and credentials
+are left out. `--remote_*`, `--noremote_*`, `--disk_cache` and `--output_groups` are rejected in
+`buildArgs` so they cannot bypass these rules, and `--output_user_root` in `startupArgs`.
 
-Not fingerprinted (machine-local or "where results come from" only): `workspaceDirectory`,
-`startupArgs`, and all remote cache settings.
+Gradle only knows what you put in `inputFiles`: declare every source and `BUILD` file the targets
+depend on. Pointing it at the whole workspace is correct but heavy and must not include the
+`bazel-*` convenience symlinks. Under-declared inputs make the task wrongly UP-TO-DATE.
+
+**`assumeHermetic` (default `false`)**: with the default, the task is never stored in or restored
+from the Gradle build cache and Bazel runs without any remote cache (a lifecycle line says so);
+local UP-TO-DATE checks still apply. Set it to `true` only when declared inputs fully determine the
+outputs. Toolchains that download things at action time (Kotlin/Native's `KONAN_DATA_DIR`) are not
+hermetic; a future hook could pin known dependency/sysroot hashes as inputs.
 
 ## Remote cache on S3
 
@@ -101,19 +112,31 @@ unrelated key schemes. Sharing a bucket (with distinct prefixes) saves infrastru
 make a Gradle-built JAR reusable by Bazel or vice versa. Eviction by `dev.pyrlyn.s3-build-cache`
 applies only to its own prefix.
 
-Read-only by default: unless `remoteUpload` is true, `--noremote_upload_local_results` is passed.
+**Read-only by default, in both modes.** Unless `bazel.remoteUpload` is true, Bazel gets
+`--noremote_upload_local_results` and the managed bazel-remote is started with
+`--num_uploaders=0`, so nothing is written to S3 (bazel-remote still writes its local disk tier
+under `build/bazel-remote/cache`, which is local only). Typical: `remoteUpload = CI`.
+
+Object layout observed with bazel-remote v2.6.4 against MinIO: `<bucket>/<s3Prefix>/ac/...` and
+`<bucket>/<s3Prefix>/cas.v2/...` (e.g. `bazel-remote/ac/...`). There is no separate index object.
 
 ## Sample (`sample/`)
 
 One Bazel workspace, five targets, each built by its own Gradle task:
 
-| Gradle task | Bazel target | How it is built | Status |
+| Gradle task | Bazel target | How it is built | Caching |
 |---|---|---|---|
-| `bazelC` | `//c:hello` | `cc_binary` from official `rules_cc` | Real rule set, hermetic-ish (host C toolchain) |
-| `bazelKotlinJvm` | `//kotlin/jvm:hello.jar` | `kt_jvm_library` from official `rules_kotlin` | Real rule set |
-| `bazelKotlinJs` | `//kotlin/js:hello` | `genrule` around official `kotlinc-js` (Kotlin 2.4.21 distribution via `http_archive`) | **Wrapper**: no Bazel rules for Kotlin/JS exist (`rules_kotlin` dropped JS). Needs a JDK on PATH |
-| `bazelKotlinWasm` | `//kotlin/wasm:hello` | `genrule` around official `kotlinc-wasm` (wasm-js target) | **Wrapper**: no Bazel rules for Kotlin/Wasm. Needs a JDK on PATH; runs on Node.js with Wasm GC |
-| `bazelKotlinNative` | `//kotlin/native:hello` | `genrule` around official `kotlinc-native` prebuilt, macOS arm64 only | **Experimental, not hermetic**: no maintained Bazel rules for Kotlin/Native; first run downloads LLVM/sysroot into `KONAN_DATA_DIR` (unsandboxed, network), links with host Xcode/CLT. Its cache key does not cover those downloaded dependencies |
+| `bazelC` | `//c:hello` | `cc_binary` from official `rules_cc` | `assumeHermetic=true` (host C toolchain) |
+| `bazelKotlinJvm` | `//kotlin/jvm:hello.jar` | `kt_jvm_library` from official `rules_kotlin` | `assumeHermetic=true` |
+| `bazelKotlinJs` | `//kotlin/js:hello` | custom `genrule` around official `kotlinc-js` 2.4.21 (pinned `http_archive`) | `assumeHermetic=true`; JDK from PATH |
+| `bazelKotlinWasm` | `//kotlin/wasm:hello` | custom `genrule` around official `kotlinc-wasm` (wasm-js target) | `assumeHermetic=true`; JDK from PATH |
+| `bazelKotlinNative` | `//kotlin/native:hello` | custom `genrule` around official `kotlinc-native` prebuilt, macOS arm64 only | `assumeHermetic=false` + Bazel tag `no-remote-cache`: not cached anywhere except local UP-TO-DATE |
+
+`rules_kotlin` covers only the JVM; the JS/Wasm/Native targets are custom wrappers written for
+this sample (other community rule sets were not evaluated). The `cc_binary` default output on
+macOS fastbuild is the executable itself (verified with `cquery --output=files`); runfiles are not
+copied, which is fine for this target. `verifyArtifacts` checks the exported files: Mach-O magic for
+C/Native, zip magic for the JAR, `\0asm` for the Wasm module, compiled JS containing the program.
 
 Each genrule compiles one single-file module (source → klib → JS/Wasm/executable). None of this
 compiles a Kotlin Multiplatform project: there is no `commonMain`/`expect`/`actual`, no
@@ -133,6 +156,8 @@ cd gradle-bazel-plugin/sample
 - Default outputs only; no output groups, no runfiles, no tree artifacts (directories fail fast).
   Name an implicit output file (e.g. `:hello.jar`) to pick one file of a multi-output rule.
 - One configuration per task: multi-platform builds need one task per `--platforms` value.
+- Runfiles are not copied; executables that need runfiles will not run from the Gradle output.
+- Hermeticity of `genrule` wrappers that use the host JDK is assumed, not enforced.
 - Bazel runs serially per Gradle build (the managed bazel-remote service has one usage slot, and
   Bazel's server locks the output base anyway).
 - No Gradle configuration cache / Bazel query-driven input discovery yet.
@@ -141,6 +166,7 @@ cd gradle-bazel-plugin/sample
 ## Tests
 
 `./gradlew :gradle-bazel-plugin:test` needs neither Bazel nor S3: unit tests cover command
-building, remote flag handling, credential isolation and config validation; a TestKit test uses a
-fake `bazel` script to check argument forwarding, the exported artifact, UP-TO-DATE on rerun, and
-re-execution after an input change.
+building, output groups, reserved flags, read-only bazel-remote, credential isolation, fingerprint
+identity and config validation; TestKit tests use a fake `bazel` script to check argument
+forwarding, the exported artifact, UP-TO-DATE, which settings do/do not invalidate the task,
+Gradle build cache restore for hermetic tasks and no caching for non-hermetic ones.

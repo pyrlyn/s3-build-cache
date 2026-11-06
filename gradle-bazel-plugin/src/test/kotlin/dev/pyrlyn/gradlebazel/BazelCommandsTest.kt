@@ -41,6 +41,11 @@ class BazelCommandsTest {
         assertTrue("--s3.disable_ssl" in cmd)
         assertTrue("--http_address=127.0.0.1:9090" in cmd)
         assertTrue(cmd.none { it.contains("secret", true) || it.contains("access_key_id") })
+        assertTrue("--num_uploaders=0" in cmd, "read-only by default")
+        assertFalse("--num_uploaders=0" in s.copy(upload = true).command())
+        assertFalse(s.identity.contains("AK"))
+        assertNotEquals(s.identity, s.copy(s3Prefix = "other").identity)
+        assertNotEquals(s.identity, s.copy(upload = true).identity)
         val env = BazelRemoteSettings.credentialEnv(mapOf("S3_CACHE_ACCESS_KEY_ID" to "AK", "S3_CACHE_SECRET_ACCESS_KEY" to "SK"))
         assertEquals(mapOf("BAZEL_REMOTE_S3_ACCESS_KEY_ID" to "AK", "BAZEL_REMOTE_S3_SECRET_ACCESS_KEY" to "SK"), env)
         assertEquals("http://127.0.0.1:9090", s.url)
@@ -51,5 +56,15 @@ class BazelCommandsTest {
         assertThrows<IllegalArgumentException> { BazelRemoteSettings("b", "/c", 5, 9090, "h", "", "p", null, false) }
         assertThrows<IllegalArgumentException> { BazelRemoteSettings("b", "/c", 0, 9090, "h", "bkt", "p", null, false) }
         assertThrows<IllegalArgumentException> { BazelRemoteSettings("b", "/c", 5, 9090, "h", "bkt", "../p", null, false) }
+    }
+
+    @Test fun `output groups and reserved build args`() {
+        assertEquals(listOf("--output_groups=a,b"), BazelCommands.outputGroupFlags(listOf("a", "b")))
+        assertEquals(emptyList<String>(), BazelCommands.outputGroupFlags(emptyList()))
+        assertThrows<IllegalArgumentException> { BazelCommands.outputGroupFlags(listOf("a,b")) }
+        assertThrows<IllegalArgumentException> { BazelCommands.validateArgs(emptyList(), listOf("--remote_cache=http://x")) }
+        assertThrows<IllegalArgumentException> { BazelCommands.validateArgs(emptyList(), listOf("--noremote_upload_local_results")) }
+        assertThrows<IllegalArgumentException> { BazelCommands.validateArgs(listOf("--output_user_root=/x"), emptyList()) }
+        BazelCommands.validateArgs(listOf("--host_jvm_args=-Xmx1g"), listOf("-c", "opt"))
     }
 }

@@ -62,6 +62,7 @@ class GradleBazelPlugin : Plugin<Project> {
             spec.parameters.s3Prefix.set(br.s3Prefix)
             spec.parameters.s3Region.set(br.s3Region)
             spec.parameters.disableSsl.set(br.disableSsl)
+            spec.parameters.upload.set(ext.remoteUpload)
             spec.parameters.logFile.set(project.layout.buildDirectory.file("bazel-remote/bazel-remote.log").map { it.asFile.absolutePath })
         }
 
@@ -69,10 +70,19 @@ class GradleBazelPlugin : Plugin<Project> {
             t.group = "bazel"
             t.executable.convention(ext.executable)
             t.workspaceDirectory.convention(ext.workspaceDirectory)
+            t.rootDirectory.convention(project.rootProject.layout.projectDirectory)
             t.outputDirectory.convention(project.layout.buildDirectory.dir("bazel/${t.name}"))
             t.remoteCacheUrl.convention(ext.remoteCacheUrl)
             t.remoteUpload.convention(ext.remoteUpload)
             t.useManagedBazelRemote.convention(br.enabled)
+            t.remoteCacheIdentity.convention(
+                br.enabled.flatMap { managed ->
+                    if (managed) project.provider {
+                        BazelRemoteSettings.identity(br.s3Endpoint.orNull, br.s3Bucket.orNull, br.s3Prefix.orNull,
+                            br.s3Region.orNull, br.disableSsl.get(), br.port.get(), ext.remoteUpload.get())
+                    } else ext.remoteCacheUrl.map { "url:$it" }
+                }
+            )
             t.bazelRemote.convention(service)
             t.usesService(service)
         }

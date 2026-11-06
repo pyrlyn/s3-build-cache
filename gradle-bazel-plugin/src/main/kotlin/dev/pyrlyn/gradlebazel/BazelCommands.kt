@@ -34,6 +34,21 @@ object BazelCommands {
         }
     }
 
+    fun outputGroupFlags(groups: List<String>): List<String> {
+        groups.forEach { require(Regex("^[A-Za-z0-9_+\\-]+$").matches(it)) { "invalid output group '$it'" } }
+        return if (groups.isEmpty()) emptyList() else listOf("--output_groups=" + groups.joinToString(","))
+    }
+
+    /** Remote cache and output root are owned by the plugin so they stay consistent and out of / in the fingerprint correctly. */
+    fun validateArgs(startup: List<String>, build: List<String>) {
+        startup.forEach { require(!it.startsWith("--output_user_root")) { "use outputUserRoot instead of startupArgs '--output_user_root'" } }
+        build.forEach {
+            require(!it.startsWith("--remote_") && !it.startsWith("--noremote_") && !it.startsWith("--disk_cache") && !it.startsWith("--output_groups")) {
+                "buildArgs must not contain '$it'; remote cache and output groups are configured by the plugin"
+            }
+        }
+    }
+
     /** Flags that affect where results come from, never what is built. Kept out of the Gradle fingerprint. */
     fun remoteFlags(remoteCacheUrl: String?, upload: Boolean): List<String> =
         if (remoteCacheUrl == null) emptyList()
