@@ -47,17 +47,6 @@ testing {
                 implementation(libs.testcontainers.minio)
                 implementation(libs.testcontainers.junit)
             }
-            targets.all {
-                testTask.configure {
-                    // Colima exposes Docker on a non-default socket; point Testcontainers at it if present.
-                    val colima = File(System.getProperty("user.home"), ".colima/default/docker.sock")
-                    if (System.getenv("DOCKER_HOST") == null && colima.exists()) {
-                        environment("DOCKER_HOST", "unix://${colima.absolutePath}")
-                        environment("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock")
-                    }
-                    shouldRunAfter(tasks.named("test"))
-                }
-            }
         }
     }
 }
@@ -71,18 +60,30 @@ gradlePlugin {
     }
 }
 
-
-publishing {
-    publications {
-        // java-gradle-plugin already creates a pluginMaven publication; configure repos only.
+// Shared by both plugins (root and :gradle-bazel-plugin).
+allprojects {
+    tasks.withType<Test>().matching { it.name == "e2eTest" }.configureEach {
+        // Colima exposes Docker on a non-default socket; point Testcontainers at it if present.
+        val colima = File(System.getProperty("user.home"), ".colima/default/docker.sock")
+        if (System.getenv("DOCKER_HOST") == null && colima.exists()) {
+            environment("DOCKER_HOST", "unix://${colima.absolutePath}")
+            environment("TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE", "/var/run/docker.sock")
+        }
+        shouldRunAfter(tasks.named("test"))
     }
-    repositories {
-        maven {
-            name = "GitHubPackages"
-            url = uri("https://maven.pkg.github.com/pyrlyn/s3-build-cache")
-            credentials {
-                username = System.getenv("GITHUB_ACTOR") ?: project.findProperty("gpr.user") as String? ?: ""
-                password = System.getenv("GITHUB_TOKEN") ?: project.findProperty("gpr.key") as String? ?: ""
+
+    pluginManager.withPlugin("maven-publish") {
+        // java-gradle-plugin already creates the pluginMaven and marker publications; configure the repo only.
+        extensions.configure<PublishingExtension> {
+            repositories {
+                maven {
+                    name = "GitHubPackages"
+                    url = uri("https://maven.pkg.github.com/pyrlyn/s3-build-cache")
+                    credentials {
+                        username = System.getenv("GITHUB_ACTOR") ?: project.findProperty("gpr.user") as String? ?: ""
+                        password = System.getenv("GITHUB_TOKEN") ?: project.findProperty("gpr.key") as String? ?: ""
+                    }
+                }
             }
         }
     }

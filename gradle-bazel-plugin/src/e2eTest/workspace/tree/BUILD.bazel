@@ -1,0 +1,6 @@
+load("//defs:rules.bzl", "tree")
+
+tree(
+    name = "tree",
+    srcs = ["a.txt"],
+)

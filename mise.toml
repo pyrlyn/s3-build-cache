@@ -1,0 +1,4 @@
+# Tools for the gradle-bazel e2e suite. The JDK comes from the machine (see toolchain.md).
+[tools]
+bazelisk = "1.30.0"
+"github:buchgr/bazel-remote" = "2.6.4"

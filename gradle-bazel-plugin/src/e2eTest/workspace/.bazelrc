@@ -1,0 +1,2 @@
+# A lockfile written by the first build would change a fingerprinted config file between runs.
+common --lockfile_mode=off
