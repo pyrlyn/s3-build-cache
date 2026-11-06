@@ -25,7 +25,7 @@ val bazelLib = tasks.register<BazelBuild>("bazelLib") {
     buildArgs.addAll("-c", "opt")                                  // fingerprinted, also passed to cquery
     outputGroups.add("default")                                    // optional --output_groups, fingerprinted
     outputUserRoot.set("/path/on/this/machine")                    // normalized out of the fingerprint
-    inputFiles.from("bazel/kotlin/jvm")                            // see "Inputs"
+    inputFiles.from("bazel/third_party")                          // additional repository-rule inputs
     assumeHermetic.set(true)                                       // opt in to caching, see below
 }
 
@@ -37,6 +37,7 @@ Outputs land in `build/bazel/<taskName>/` (override with `outputDirectory`).
 
 ## How it works
 
+0. Before Gradle up-to-date/cache checks, discover workspace inputs (see below).
 1. `bazel build <buildArgs> [remote flags] -- <targets>`
 2. `bazel info <buildArgs> execution_root`
 3. For each target, `bazel cquery <buildArgs> --output=files -- <target>` lists the target's default
@@ -51,16 +52,52 @@ command per target, honours the same configuration flags, and needs no JSON/prot
 `BazelBuild` fingerprints: `executable`, `targets`, `outputNames`, `buildArgs`, `outputGroups`,
 `startupArgs`, the workspace path relative to the root project, `assumeHermetic`, the remote
 cache identity (external URL, or bazel-remote endpoint/bucket/region/prefix/port/ssl/upload) and
-`remoteUpload`, plus file contents of `inputFiles` and of the workspace config files
+`remoteUpload`, `discoverSourceInputs`, the sorted discovered workspace-relative paths, plus
+file contents of discovered inputs, additional `inputFiles` and the workspace config files
 (`.bazelversion`, `MODULE.bazel`, `MODULE.bazel.lock`, `.bazelrc`, `WORKSPACE[.bazel]`, when present).
 Directories in `inputFiles` are hashed recursively by file content and path relative to the
 directory, never by absolute path. Only `outputUserRoot` (machine-local location) and credentials
 are left out. `--remote_*`, `--noremote_*`, `--disk_cache` and `--output_groups` are rejected in
 `buildArgs` so they cannot bypass these rules, and `--output_user_root` in `startupArgs`.
 
-Gradle only knows what you put in `inputFiles`: declare every source and `BUILD` file the targets
-depend on. Pointing it at the whole workspace is correct but heavy and must not include the
-`bazel-*` convenience symlinks. Under-declared inputs make the task wrongly UP-TO-DATE.
+### Automatic local source inputs (default ON)
+
+Before every input snapshot (even an UP-TO-DATE or FROM-CACHE build), the task runs:
+
+- `bazel cquery <buildArgs> <output-group flags> --output=label -- 'kind("source file", deps(set("//pkg:target")))'`
+- `bazel query --output=label -- 'buildfiles(deps(set("//pkg:target")))'`
+
+Both use the same executable, startup options and output user root as the build. The configured
+query follows selected dependencies, including sources of rules that generate intermediate files;
+generated outputs themselves are not Gradle inputs. Bazel traverses the graph, not filesystem
+symlinks. The loading-phase query includes transitive BUILD and loaded `.bzl` files (including
+packages containing only extensions). It conservatively includes all `select()` branches because
+`buildfiles` is unavailable in cquery; build/configuration flags are not passed to `query` because
+it does not accept them. Repository graph selection must be shared by build and query (use
+`common` rc entries, not build-only repository overrides). Incompatible loading/query options fail closed rather than silently
+under-declaring inputs. Cycles or other Bazel errors fail the task before cache lookup.
+
+Only main-workspace labels (`//`, `@//`, `@@//`) become file inputs, with relative paths and
+contents fingerprinted. External repository labels are excluded: downloaded tools, Bazel output
+roots, generated files and machine-local caches are never automatically hashed. Missing files,
+malformed local labels, wildcard path characters (`*`, `?`), traversal and symlinks escaping the
+workspace fail discovery. An exact-include file tree rooted at the workspace preserves the
+path/content association even when different packages contain identically named files. Query
+results are memoized only for the current task instance, never persisted between Gradle runs.
+This adds two Bazel queries per task, including on an otherwise UP-TO-DATE build.
+
+`inputFiles` remains **additive**: declare repository-rule inputs (e.g. local BUILD templates used
+by MODULE extensions), imported rc files, local repositories, environment-derived data and other
+inputs outside this graph explicitly. Auto-discovery is not complete toolchain/environment
+tracking. Home/system rc files, `user.bazelrc`, nested MODULE includes/extensions, untracked glob
+membership effects on repository rules, downloads at action time and host JDK/Xcode/sysroots are
+not automatically fingerprinted. Never add credential-bearing rc files as cache inputs; keep
+auth separate and use a non-secret input for any output-affecting configuration.
+
+For incompatible Bazel versions/workspaces, set `discoverSourceInputs.set(false)` on the task
+and declare **all** sources and package definitions in `inputFiles`. There is no silent fallback.
+Avoid whole-workspace globs: they can traverse `bazel-*` convenience symlinks and local caches.
+Concurrent edits during a build are unsupported (as with ordinary Gradle input snapshots).
 
 **`assumeHermetic` (default `false`)**: with the default, the task is never stored in or restored
 from the Gradle build cache and Bazel runs without any remote cache (a lifecycle line says so);
@@ -153,14 +190,14 @@ cd gradle-bazel-plugin/sample
 ## Limitations
 
 - Explicit labels only; no `//...`, `:all`, or `*`. One task can list several targets.
-- Default outputs only; no output groups, no runfiles, no tree artifacts (directories fail fast).
+- Default outputs unless `outputGroups` is set; no runfiles or tree artifacts (directories fail fast).
   Name an implicit output file (e.g. `:hello.jar`) to pick one file of a multi-output rule.
 - One configuration per task: multi-platform builds need one task per `--platforms` value.
 - Runfiles are not copied; executables that need runfiles will not run from the Gradle output.
 - Hermeticity of `genrule` wrappers that use the host JDK is assumed, not enforced.
 - Bazel runs serially per Gradle build (the managed bazel-remote service has one usage slot, and
   Bazel's server locks the output base anyway).
-- No Gradle configuration cache / Bazel query-driven input discovery yet.
+- No Gradle configuration cache support. Automatic queries cover local graph files, not full toolchains.
 - The plugin does not download Bazel or bazel-remote.
 
 ## Tests
@@ -169,4 +206,6 @@ cd gradle-bazel-plugin/sample
 building, output groups, reserved flags, read-only bazel-remote, credential isolation, fingerprint
 identity and config validation; TestKit tests use a fake `bazel` script to check argument
 forwarding, the exported artifact, UP-TO-DATE, which settings do/do not invalidate the task,
-Gradle build cache restore for hermetic tasks and no caching for non-hermetic ones.
+Gradle build cache restore for hermetic tasks and no caching for non-hermetic ones. Discovery
+tests cover source/BUILD/loaded-extension edits, unrelated files, additive explicit inputs,
+opt-out and fail-closed query errors/unsafe paths.

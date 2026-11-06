@@ -60,6 +60,17 @@ object BazelCommands {
     fun cqueryFiles(exe: String, startup: List<String>, args: List<String>, target: String) =
         listOf(exe) + startup + "cquery" + args + "--output=files" + "--" + target
 
+    private fun targetSet(targets: List<String>) = "set(" + targets.joinToString(" ") { "\"$it\"" } + ")"
+
+    fun sourceInputs(exe: String, startup: List<String>, args: List<String>, targets: List<String>) =
+        listOf(exe) + startup + "cquery" + args + listOf("--output=label", "--",
+            "kind(\"source file\", deps(${targetSet(targets)}))")
+
+    // buildfiles/loadfiles are unavailable in cquery. Loading-phase query conservatively includes
+    // metadata from all select branches; configuration-only build flags are not valid query flags.
+    fun buildFiles(exe: String, startup: List<String>, targets: List<String>) =
+        listOf(exe) + startup + listOf("query", "--output=label", "--", "buildfiles(deps(${targetSet(targets)}))")
+
     fun executionRoot(exe: String, startup: List<String>, args: List<String>) =
         listOf(exe) + startup + "info" + args + "execution_root"
 }
