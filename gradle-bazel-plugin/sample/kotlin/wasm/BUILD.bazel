@@ -1,0 +1,26 @@
+# No Bazel rule set supports Kotlin/Wasm; thin genrule around the official kotlinc-wasm
+# (wasm-js target, runs on Node.js with Wasm GC). Needs a JDK on PATH (not hermetic).
+genrule(
+    name = "hello",
+    srcs = ["hello.kt"],
+    outs = [
+        "hello.wasm",
+        "hello.mjs",
+        "hello.import-object.mjs",
+        "hello.js-builtins.mjs",
+    ],
+    cmd = """
+set -eu
+KC=$(location @kotlin_compiler//:bin/kotlinc-wasm)
+STD=$(location @kotlin_compiler//:lib/kotlin-stdlib-wasm-js.klib)
+W=$(RULEDIR)/_work
+"$$KC" -libraries "$$STD" -ir-output-dir "$$W" -ir-output-name hello $(location hello.kt) >/dev/null
+"$$KC" -libraries "$$STD:$$W/hello.klib" -Xir-produce-js -Xinclude="$$W/hello.klib" -ir-output-dir "$$W/out" -ir-output-name hello >/dev/null
+for f in hello.wasm hello.mjs hello.import-object.mjs hello.js-builtins.mjs; do cp "$$W/out/$$f" $(RULEDIR)/$$f; done
+""",
+    tools = [
+        "@kotlin_compiler//:bin/kotlinc-wasm",
+        "@kotlin_compiler//:lib/kotlin-stdlib-wasm-js.klib",
+        "@kotlin_compiler//:dist",
+    ],
+)

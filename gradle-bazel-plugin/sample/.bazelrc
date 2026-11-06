@@ -1,0 +1,2 @@
+# Machine-local settings (output_user_root, remote cache auth) belong in a git-ignored user.bazelrc.
+try-import %workspace%/user.bazelrc

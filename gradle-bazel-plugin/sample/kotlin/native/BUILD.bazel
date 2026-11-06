@@ -1,0 +1,27 @@
+# EXPERIMENTAL, NOT HERMETIC. There is no maintained Bazel rule set for Kotlin/Native.
+# This genrule wraps the official kotlinc-native (macOS arm64 only). On first use kotlinc-native
+# downloads its LLVM/sysroot dependencies into KONAN_DATA_DIR (set it with --action_env), so the
+# action needs network access and runs unsandboxed. Linking uses the host Xcode/CLT toolchain.
+genrule(
+    name = "hello",
+    srcs = ["hello.kt"],
+    outs = ["hello.kexe"],
+    cmd = """
+set -eu
+"$(location @kotlin_native_macos_arm64//:bin/kotlinc-native)" $(location hello.kt) -o $(RULEDIR)/hello >/dev/null
+""",
+    tags = [
+        "no-remote-cache",
+        "no-remote-exec",
+        "no-sandbox",
+        "requires-network",
+    ],
+    target_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:aarch64",
+    ],
+    tools = [
+        "@kotlin_native_macos_arm64//:bin/kotlinc-native",
+        "@kotlin_native_macos_arm64//:dist",
+    ],
+)

@@ -4,3 +4,6 @@ require(JavaVersion.current() >= JavaVersion.VERSION_21) {
 }
 
 rootProject.name = "s3-build-cache"
+
+// Experimental Gradle -> Bazel bridge (independent plugin, does not touch the S3 build cache plugin).
+include("gradle-bazel-plugin")
