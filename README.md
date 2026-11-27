@@ -1,4 +1,4 @@
-# s3-build-cache
+<h1><picture><source media="(prefers-color-scheme: dark)" srcset="brand/logo-dark.svg"><img src="brand/logo.svg" width="32" height="32" alt="" align="absmiddle"></picture> s3-build-cache</h1>
 
 Gradle settings plugin: remote build cache on any S3-compatible store (AWS S3, Cloudflare R2, MinIO). Client is AWS SDK v2.
 Entries are stored as objects `<prefix><cache-key hash>`. If the store is unreachable, Gradle disables the remote cache for the rest of the build; the build does not fail.
